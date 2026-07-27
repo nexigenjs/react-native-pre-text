@@ -110,13 +110,34 @@ class PreText: HybridPreTextSpec {
     let didTruncate =
       maxLines > 0 && glyphRange.length < manager.numberOfGlyphs
 
+    let scale = CGFloat(options.pixelRatio ?? 0)
+
     return TextMeasurement(
-      width: Double(widest),
-      height: Double(used.height),
+      width: Double(pixelCeil(widest, scale)),
+      height: Double(pixelCeil(used.height, scale)),
       lineCount: Double(lineCount),
-      lastLineWidth: Double(lastLineWidth),
+      lastLineWidth: Double(pixelCeil(lastLineWidth, scale)),
       didTruncate: didTruncate
     )
+  }
+
+  /// React Native rounds a text size **up** to the next whole device pixel
+  /// before Yoga ever sees it. `RCTTextLayoutManager.mm` does
+  ///
+  ///     ceil(size * pointScaleFactor) / pointScaleFactor
+  ///
+  /// and `ParagraphShadowNode.cpp` repeats it, nudging by 0.01 first, with the
+  /// comment "Rounding to *next* value on the pixel grid" — so it is policy,
+  /// not an accident.
+  ///
+  /// Returning TextKit's raw fractional value therefore lands short of
+  /// `onLayout` by up to one pixel: 0.333 pt at 3x, 0.5 pt at 2x. Always short,
+  /// never over, because the platform ceils rather than rounds. Applying the
+  /// same step is what makes `measure()` equal `onLayout` instead of merely
+  /// approaching it.
+  private func pixelCeil(_ value: CGFloat, _ scale: CGFloat) -> CGFloat {
+    guard scale > 0, value.isFinite, value > 0 else { return value }
+    return ceil(value * scale) / scale
   }
 
   // MARK: - Attributes

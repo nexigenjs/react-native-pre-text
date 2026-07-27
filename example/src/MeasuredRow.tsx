@@ -10,19 +10,44 @@
  * One thing here is easy to get wrong: the `<Text>` uses
  * `alignSelf: 'flex-start'` with `maxWidth` rather than stretching, so a
  * single-line sample reports its real intrinsic width instead of the container
- * width. Once the text wraps, though, the platform reports the constraint
- * itself — so for multi-line samples only the height comparison carries
- * information, and the row says so rather than printing a meaningless Δw.
+ * width. Once the text wraps, though, no style can recover the longest line —
+ * `RCTTextLayoutManager.mm` overwrites the width with the container's outright:
+ *
+ *     if (textDidWrap) { size.width = textContainer.size.width; }
+ *
+ * So a wrapped sample's rendered width is the constraint, and comparing it to
+ * `measure().width` would compare two different quantities. The row prints
+ * `Δw n/a` for those instead of a meaningless number.
+ *
+ * That leaves `measure().width` unverified for exactly the samples that need it
+ * most, so there is a second probe: the same text inside a horizontal
+ * `ScrollView`, which hands its child an unbounded width. Nothing wraps there,
+ * `textDidWrap` stays false, and `onLayout` reports the genuine longest line —
+ * which is what `measureWidth()` claims. Δwi is that comparison.
  */
 
 import { memo, useCallback, useMemo, useState } from 'react';
-import { StyleSheet, Text, View, type LayoutChangeEvent } from 'react-native';
-import { measure } from 'react-native-pre-text';
+import {
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+  type LayoutChangeEvent,
+} from 'react-native';
+import { measure, measureWidth } from 'react-native-pre-text';
 
 import type { Sample } from './corpus';
-import { CARD_MARGIN_H, CARD_PADDING_H, FONT, TOLERANCE } from './metrics';
+import {
+  CARD_MARGIN_H,
+  CARD_PADDING_H,
+  FONT,
+  TOLERANCE,
+  formatMs,
+  now,
+  useRestartingClock,
+} from './metrics';
 
-type Measured = { width: number; height: number };
+type Measured = { width: number; height: number; elapsedMs: number };
 
 type Props = {
   sample: Sample;
@@ -32,25 +57,54 @@ type Props = {
 };
 
 function MeasuredRowImpl({ sample, index, availableWidth }: Props) {
-  const predicted = useMemo(
-    () => measure(sample.text, FONT, availableWidth),
-    [sample.text, availableWidth],
+  const { predicted, predictedMs } = useMemo(() => {
+    const started = now();
+    const result = measure(sample.text, FONT, availableWidth);
+    return { predicted: result, predictedMs: now() - started };
+  }, [sample.text, availableWidth]);
+
+  /** Natural width on one unwrapped line — what the ScrollView probe renders. */
+  const { predictedIntrinsic, predictedIntrinsicMs } = useMemo(() => {
+    const started = now();
+    const result = measureWidth(sample.text, FONT);
+    return { predictedIntrinsic: result, predictedIntrinsicMs: now() - started };
+  }, [sample.text]);
+
+  /**
+   * When this row last began waiting on the renderer. Restarts with the inputs,
+   * because a width change makes `onLayout` fire again and the old start would
+   * turn the new latency into nonsense.
+   */
+  const startedWaitingAt = useRestartingClock(
+    `${sample.text}|${availableWidth}`,
   );
 
   const [measured, setMeasured] = useState<Measured | null>(null);
+  const [intrinsic, setIntrinsic] = useState<number | null>(null);
 
-  const onTextLayout = useCallback((event: LayoutChangeEvent) => {
-    const { width, height } = event.nativeEvent.layout;
-    // Bail out when nothing moved — onLayout fires on every re-render, and an
-    // unconditional setState here would loop the row forever.
-    setMeasured(previous =>
-      previous &&
-      Math.abs(previous.width - width) < 0.01 &&
-      Math.abs(previous.height - height) < 0.01
-        ? previous
-        : { width, height },
+  const onIntrinsicLayout = useCallback((event: LayoutChangeEvent) => {
+    const { width } = event.nativeEvent.layout;
+    setIntrinsic(previous =>
+      previous !== null && Math.abs(previous - width) < 0.01 ? previous : width,
     );
   }, []);
+
+  const onTextLayout = useCallback(
+    (event: LayoutChangeEvent) => {
+      const { width, height } = event.nativeEvent.layout;
+      const elapsedMs = now() - startedWaitingAt;
+      // Bail out when nothing moved — onLayout fires on every re-render, and an
+      // unconditional setState here would loop the row forever.
+      setMeasured(previous =>
+        previous &&
+        Math.abs(previous.width - width) < 0.01 &&
+        Math.abs(previous.height - height) < 0.01
+          ? previous
+          : { width, height, elapsedMs },
+      );
+    },
+    [startedWaitingAt],
+  );
 
   // Once the text wraps, the platform reports the constraint rather than the
   // longest line, so the rendered width stops being a measurement of the text.
@@ -59,11 +113,14 @@ function MeasuredRowImpl({ sample, index, availableWidth }: Props) {
   const deltaWidth =
     measured && widthIsComparable ? measured.width - predicted.width : null;
   const deltaHeight = measured ? measured.height - predicted.height : null;
+  const deltaIntrinsic =
+    intrinsic !== null ? intrinsic - predictedIntrinsic : null;
 
   const matches =
     deltaHeight !== null &&
     Math.abs(deltaHeight) <= TOLERANCE &&
-    (deltaWidth === null || Math.abs(deltaWidth) <= TOLERANCE);
+    (deltaWidth === null || Math.abs(deltaWidth) <= TOLERANCE) &&
+    (deltaIntrinsic === null || Math.abs(deltaIntrinsic) <= TOLERANCE);
 
   return (
     <View style={styles.card}>
@@ -78,13 +135,33 @@ function MeasuredRowImpl({ sample, index, availableWidth }: Props) {
         {sample.text}
       </Text>
 
+      {/*
+        A horizontal ScrollView measures its child with an unbounded width, so
+        nothing wraps and `onLayout` reports the true longest line. Invisible —
+        it exists only to give Δwi something real to compare against.
+      */}
+      <ScrollView
+        horizontal
+        scrollEnabled={false}
+        showsHorizontalScrollIndicator={false}
+        style={styles.intrinsicProbe}
+        pointerEvents="none">
+        <Text
+          style={FONT}
+          allowFontScaling={false}
+          onLayout={onIntrinsicLayout}>
+          {sample.text}
+        </Text>
+      </ScrollView>
+
       <View style={[styles.banner, styles.bannerPredicted]}>
         <Text style={styles.bannerLabel}>
           measure({availableWidth.toFixed(1)})
         </Text>
         <Text style={styles.bannerValue}>
           {predicted.width.toFixed(2)} × {predicted.height.toFixed(2)} pt ·{' '}
-          {predicted.lineCount} {predicted.lineCount === 1 ? 'line' : 'lines'}
+          {predicted.lineCount} {predicted.lineCount === 1 ? 'line' : 'lines'} (
+          {formatMs(predictedMs)})
         </Text>
       </View>
 
@@ -94,7 +171,7 @@ function MeasuredRowImpl({ sample, index, availableWidth }: Props) {
         </Text>
         <Text style={styles.bannerValue}>
           {measured
-            ? `${measured.width.toFixed(2)} × ${measured.height.toFixed(2)} pt`
+            ? `${measured.width.toFixed(2)} × ${measured.height.toFixed(2)} pt (${formatMs(measured.elapsedMs)})`
             : 'measuring…'}
         </Text>
       </View>
@@ -110,7 +187,7 @@ function MeasuredRowImpl({ sample, index, availableWidth }: Props) {
               styles.bannerLabel,
               matches ? styles.bannerLabelMatch : styles.bannerLabelNoMatch,
             ]}>
-            {matches ? 'ЗБІГ з onLayout' : 'РОЗБІЖНІСТЬ'}
+            {matches ? 'MATCHES onLayout' : 'MISMATCH'}
           </Text>
           <Text style={styles.bannerValue}>
             {deltaWidth === null
@@ -118,15 +195,32 @@ function MeasuredRowImpl({ sample, index, availableWidth }: Props) {
               : `Δw ${formatDelta(deltaWidth)}`}{' '}
             · Δh {formatDelta(deltaHeight ?? 0)}
           </Text>
+          <Text style={styles.bannerLabel}>
+            intrinsic {predictedIntrinsic.toFixed(2)} (
+            {formatMs(predictedIntrinsicMs)}) →{' '}
+            {intrinsic === null ? 'measuring…' : intrinsic.toFixed(2)} pt · Δwi{' '}
+            {deltaIntrinsic === null ? '—' : formatDelta(deltaIntrinsic)}
+          </Text>
         </View>
       ) : null}
     </View>
   );
 }
 
+/**
+ * A delta the display itself rounds away to nothing is zero — not `-0.00`.
+ * Printing a sign on it reads as a real miss, which is the opposite of what
+ * happened, so round first and only then decide whether a sign is warranted.
+ */
 function formatDelta(value: number): string {
-  const text = Number.isInteger(value) ? value.toFixed(0) : value.toFixed(2);
-  return value > 0 ? `+${text}` : text;
+  const rounded = Math.round(value * 100) / 100;
+  if (rounded === 0) {
+    return '0';
+  }
+  const text = Number.isInteger(rounded)
+    ? rounded.toFixed(0)
+    : rounded.toFixed(2);
+  return rounded > 0 ? `+${text}` : text;
 }
 
 export const MeasuredRow = memo(MeasuredRowImpl);
@@ -149,6 +243,13 @@ const styles = StyleSheet.create({
   sample: {
     color: '#e8edf3',
     alignSelf: 'flex-start',
+  },
+  // Laid out for real, just never seen.
+  intrinsicProbe: {
+    position: 'absolute',
+    opacity: 0,
+    top: 0,
+    left: 0,
   },
   banner: {
     borderRadius: 8,

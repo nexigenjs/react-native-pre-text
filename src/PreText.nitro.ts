@@ -57,12 +57,17 @@ export interface MeasureOptions {
   /** Mirrors `numberOfLines`; omit or pass 0 for unlimited. */
   maxLines?: number;
   /**
-   * `PixelRatio.get()`. Android's text engine works in physical pixels while
-   * every number crossing this boundary is in dp, so the ratio is needed to
-   * convert in and back out. Measuring dp as if it were px is self-consistent
-   * enough to look almost right and is wrong by a pixel or two everywhere.
+   * `PixelRatio.get()`. Needed on both platforms, for different reasons.
    *
-   * iOS ignores it — UIKit already works in the same points RN reports.
+   * Android's text engine works in physical pixels while every number crossing
+   * this boundary is in dp, so the ratio is needed to convert in and back out.
+   * Measuring dp as if it were px is self-consistent enough to look almost
+   * right and is wrong by a pixel or two everywhere.
+   *
+   * iOS needs it because React Native rounds a text size *up* to the next whole
+   * device pixel before Yoga sees it — `ceil(size * pointScaleFactor) /
+   * pointScaleFactor`. Returning TextKit's raw fractional value lands short of
+   * `onLayout` by up to one pixel, so the same step is applied here.
    */
   pixelRatio?: number;
 }

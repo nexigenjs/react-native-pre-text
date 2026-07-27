@@ -11,6 +11,7 @@
  * hardcoded guess.
  */
 
+import { useRef } from 'react';
 import type { MeasurableStyle } from 'react-native-pre-text';
 
 export const FONT: MeasurableStyle = {
@@ -41,3 +42,42 @@ export function textWidthFor(screenWidth: number): number {
 
 /** Below this, a predicted/rendered gap is sub-pixel rounding, not an error. */
 export const TOLERANCE = 0.5;
+
+/**
+ * Monotonic clock in milliseconds, for the timing panel.
+ *
+ * Hermes exposes `performance.now`, but falling back keeps the example running
+ * on a runtime that does not — a missing timer should not take the whole
+ * accuracy harness down with it.
+ */
+export function now(): number {
+  return typeof performance !== 'undefined' &&
+    typeof performance.now === 'function'
+    ? performance.now()
+    : Date.now();
+}
+
+/**
+ * A timestamp that restarts whenever `key` changes.
+ *
+ * `useMemo(() => now(), [key])` would express the same thing, but the closure
+ * never reads `key`, so `exhaustive-deps` calls the dependency unnecessary and
+ * is within its rights to — the restart is intent, not data flow. Comparing the
+ * key by hand states the intent instead of arguing with the rule.
+ */
+export function useRestartingClock(key: unknown): number {
+  const ref = useRef({ key, at: now() });
+  if (ref.current.key !== key) {
+    ref.current = { key, at: now() };
+  }
+  return ref.current.at;
+}
+
+/** Sub-millisecond values are the norm here, so three decimals or it reads 0. */
+export function formatMs(value: number): string {
+  return value >= 100
+    ? `${value.toFixed(0)} ms`
+    : value >= 1
+      ? `${value.toFixed(2)} ms`
+      : `${value.toFixed(3)} ms`;
+}

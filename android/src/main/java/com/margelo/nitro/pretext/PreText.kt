@@ -2,6 +2,7 @@ package com.margelo.nitro.pretext
 
 import android.graphics.Typeface
 import android.os.Build
+import android.text.BoringLayout
 import android.text.Layout
 import android.text.SpannableString
 import android.text.StaticLayout
@@ -79,8 +80,10 @@ class PreText : HybridPreTextSpec() {
   ): TextMeasurement {
     val text = transform(rawText, spec)
     val maxLines = (options.maxLines ?: 0.0).toInt()
-    // Clamp rather than cast: an unbounded width would wrap negative.
-    val width = ceil(options.maxWidth * density)
+    // RN's AT_MOST path floors the physical-pixel constraint before handing
+    // it to StaticLayout. Ceil here can move a near-boundary word to the
+    // previous line compared with the real <Text>.
+    val width = floor(options.maxWidth * density)
       .coerceIn(0.0, MAX_LAYOUT_WIDTH)
       .toInt()
 
@@ -97,19 +100,50 @@ class PreText : HybridPreTextSpec() {
       }
     } ?: text
 
-    val builder = StaticLayout.Builder
-      .obtain(source, 0, source.length, paint, width)
-      .setAlignment(Layout.Alignment.ALIGN_NORMAL)
-      .setIncludePad(spec.includeFontPadding ?: true)
-      .setBreakStrategy(breakStrategy(spec.textBreakStrategy))
-      .setHyphenationFrequency(hyphenationFrequency(spec.hyphenationFrequency))
+    val includeFontPadding = spec.includeFontPadding ?: true
+    val boring = BoringLayout.isBoring(source, paint)
+    val layout: Layout
+    val usesIntrinsicWidth: Boolean
 
-    if (maxLines > 0) {
-      builder.setMaxLines(maxLines)
-      builder.setEllipsize(android.text.TextUtils.TruncateAt.END)
+    if (boring != null && boring.width <= width) {
+      // This is RN's fast path for simple single-line text. Its integer
+      // metrics width is also the width Yoga receives and onLayout reports.
+      layout = BoringLayout.make(
+        source,
+        paint,
+        boring.width,
+        Layout.Alignment.ALIGN_NORMAL,
+        1f,
+        0f,
+        boring,
+        includeFontPadding
+      )
+      usesIntrinsicWidth = true
+    } else {
+      val desiredWidth = ceil(Layout.getDesiredWidth(source, paint).toDouble())
+        .coerceIn(0.0, MAX_LAYOUT_WIDTH)
+        .toInt()
+      val layoutWidth = minOf(desiredWidth, width)
+      val builder = StaticLayout.Builder
+        .obtain(source, 0, source.length, paint, layoutWidth)
+        .setAlignment(Layout.Alignment.ALIGN_NORMAL)
+        .setLineSpacing(0f, 1f)
+        .setIncludePad(includeFontPadding)
+        .setBreakStrategy(breakStrategy(spec.textBreakStrategy))
+        .setHyphenationFrequency(hyphenationFrequency(spec.hyphenationFrequency))
+
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+        builder.setUseLineSpacingFromFallbacks(true)
+      }
+
+      if (maxLines > 0) {
+        builder.setMaxLines(maxLines)
+        builder.setEllipsize(android.text.TextUtils.TruncateAt.END)
+      }
+
+      layout = builder.build()
+      usesIntrinsicWidth = desiredWidth <= width
     }
-
-    val layout = builder.build()
 
     var widest = 0f
     var lastLineWidth = 0f
@@ -124,7 +158,10 @@ class PreText : HybridPreTextSpec() {
 
     // Back to dp — the units `onLayout` reports.
     return TextMeasurement(
-      width = widest / density,
+      // For an intrinsic layout this is the exact integer physical-pixel
+      // width RN gives Yoga. For wrapped text preserve the API's useful
+      // "widest laid-out line" contract rather than returning the container.
+      width = (if (usesIntrinsicWidth) layout.width.toFloat() else widest) / density,
       height = layout.height / density,
       lineCount = layout.lineCount.toDouble(),
       lastLineWidth = lastLineWidth / density,
@@ -187,6 +224,19 @@ class PreText : HybridPreTextSpec() {
     val size = (spec.fontSize * scaleOf(spec) * density).toFloat()
     paint.textSize = size
     paint.typeface = resolveTypeface(spec)
+
+    // RN applies a CustomStyleSpan whenever any font selector is present.
+    // Besides resolving the Typeface, that span enables both flags below.
+    // They materially change glyph advances for spaces, fallback fonts and
+    // emoji, so omitting them makes width drift by several physical pixels.
+    if (
+      spec.fontFamily != null ||
+      spec.fontWeight != null ||
+      spec.fontStyle != null
+    ) {
+      paint.isSubpixelText = true
+      paint.isLinearText = true
+    }
 
     spec.letterSpacing?.let { spacing ->
       // Android wants ems, RN gives dp; density cancels out in the ratio.

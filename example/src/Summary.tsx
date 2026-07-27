@@ -1,42 +1,213 @@
-import { useCallback, useMemo, useState } from 'react';
-import { StyleSheet, Text, View, type LayoutChangeEvent } from 'react-native';
-import { measure } from 'react-native-pre-text';
+import { useCallback, useMemo, useRef, useState } from 'react';
+import {
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+  type LayoutChangeEvent,
+} from 'react-native';
+import { measure, measureBatch, measureWidth } from 'react-native-pre-text';
 
 import { SAMPLES } from './corpus';
-import { FONT, TOLERANCE } from './metrics';
+import {
+  FONT,
+  TOLERANCE,
+  formatMs,
+  now,
+  useRestartingClock,
+} from './metrics';
+
+const TEXTS = SAMPLES.map(sample => sample.text);
+
+/**
+ * How many times to repeat each timed workload.
+ *
+ * One `measure()` call runs well under a millisecond, which is the same order
+ * as `performance.now()`'s own resolution — timing a single call mostly reports
+ * the clock, not the work, and dividing that by the case count manufactures
+ * absurdities like 0.0002 ms. Timing a whole pass over all cases puts each
+ * sample into the milliseconds where the clock is trustworthy, and the median
+ * of several passes drops the one that collided with a GC.
+ *
+ * There is no measurement cache in the native layer, so every pass does the
+ * full amount of work rather than replaying the first one.
+ */
+const PASSES = 10;
+
+function benchmark(run: () => void): number {
+  const samples: number[] = [];
+  for (let pass = 0; pass < PASSES; pass++) {
+    const started = now();
+    run();
+    samples.push(now() - started);
+  }
+  samples.sort((a, b) => a - b);
+  return samples[Math.floor(samples.length / 2)]!;
+}
 
 const CASES = SAMPLES.length;
 
-type Miss = { kind: string; rendered: number; delta: number };
+type RenderedLayout = {
+  width: number;
+  height: number;
+  constraint: number;
+};
+
+type Miss = {
+  id: string;
+  kind: string;
+  renderedWidth: number;
+  renderedHeight: number;
+  deltaWidth: number | null;
+  deltaHeight: number;
+  deltaIntrinsic: number | null;
+};
 
 export function Summary({ width }: { width: number }) {
-  const [heights, setHeights] = useState<Record<string, number>>({});
+  const [layouts, setLayouts] = useState<Record<string, RenderedLayout>>({});
 
-  const onProbeLayout = useCallback((id: string, height: number) => {
-    setHeights(previous =>
-      previous[id] !== undefined && Math.abs(previous[id]! - height) < 0.01
+  /**
+   * When the renderer was handed this batch, and when it last answered. Refs,
+   * not state: the timestamp must not itself schedule the re-render it times.
+   */
+  const startedWaitingAt = useRestartingClock(width);
+  const lastLayoutAt = useRef(0);
+
+  const onProbeLayout = useCallback(
+    (id: string, renderedWidth: number, renderedHeight: number) => {
+      lastLayoutAt.current = now();
+      setLayouts(previous => {
+        const current = previous[id];
+        return current &&
+          Math.abs(current.width - renderedWidth) < 0.01 &&
+          Math.abs(current.height - renderedHeight) < 0.01 &&
+          Math.abs(current.constraint - width) < 0.01
+          ? previous
+          : {
+              ...previous,
+              [id]: {
+                width: renderedWidth,
+                height: renderedHeight,
+                constraint: width,
+              },
+            };
+      });
+    },
+    [width],
+  );
+
+  /**
+   * Widths again, but unwrapped. A wrapped `<Text>` reports the constraint as
+   * its width, so the constrained probes above can never verify
+   * `measure().width` for exactly the samples that wrap. A horizontal
+   * `ScrollView` hands its child an unbounded width, nothing wraps, and
+   * `onLayout` gives up the real longest line.
+   */
+  const [intrinsics, setIntrinsics] = useState<Record<string, number>>({});
+
+  const onIntrinsicLayout = useCallback((id: string, rendered: number) => {
+    lastLayoutAt.current = now();
+    setIntrinsics(previous =>
+      previous[id] !== undefined &&
+      Math.abs(previous[id]! - rendered) < 0.01
         ? previous
-        : { ...previous, [id]: height },
+        : { ...previous, [id]: rendered },
     );
   }, []);
 
+  const measuredCases = useMemo(() => {
+    return SAMPLES.reduce(
+      (count, sample) =>
+        Math.abs((layouts[sample.id]?.constraint ?? -1) - width) < 0.01 &&
+        intrinsics[sample.id] !== undefined
+          ? count + 1
+          : count,
+      0,
+    );
+  }, [layouts, intrinsics, width]);
+
   const report = useMemo(() => {
-    if (Object.keys(heights).length < CASES) {
+    if (measuredCases < CASES) {
       return null;
     }
+
     const misses: Miss[] = [];
     let worst = 0;
     for (const sample of SAMPLES) {
-      const rendered = heights[sample.id]!;
-      const delta = measure(sample.text, FONT, width).height - rendered;
-      if (!Number.isFinite(delta) || Math.abs(delta) > TOLERANCE) {
-        misses.push({ kind: sample.kind, rendered, delta });
+      const rendered = layouts[sample.id]!;
+      const predicted = measure(sample.text, FONT, width);
+      const deltaHeight = rendered.height - predicted.height;
+
+      // Keep this in sync with MeasuredRow: wrapped text reports the
+      // constraint as its width, not the widest laid-out line.
+      const widthIsComparable = rendered.width < width - TOLERANCE;
+      const deltaWidth = widthIsComparable
+        ? rendered.width - predicted.width
+        : null;
+
+      // Unwrapped width is always comparable, wrapped or not.
+      const renderedIntrinsic = intrinsics[sample.id];
+      const deltaIntrinsic =
+        renderedIntrinsic === undefined
+          ? null
+          : renderedIntrinsic - measureWidth(sample.text, FONT);
+
+      const matches =
+        Number.isFinite(deltaHeight) &&
+        Math.abs(deltaHeight) <= TOLERANCE &&
+        (deltaWidth === null ||
+          (Number.isFinite(deltaWidth) &&
+            Math.abs(deltaWidth) <= TOLERANCE)) &&
+        (deltaIntrinsic === null ||
+          (Number.isFinite(deltaIntrinsic) &&
+            Math.abs(deltaIntrinsic) <= TOLERANCE));
+
+      if (!matches) {
+        misses.push({
+          id: sample.id,
+          kind: sample.kind,
+          renderedWidth: rendered.width,
+          renderedHeight: rendered.height,
+          deltaWidth,
+          deltaHeight,
+          deltaIntrinsic,
+        });
       } else {
-        worst = Math.max(worst, Math.abs(delta));
+        worst = Math.max(
+          worst,
+          Math.abs(deltaHeight),
+          deltaWidth === null ? 0 : Math.abs(deltaWidth),
+          deltaIntrinsic === null ? 0 : Math.abs(deltaIntrinsic),
+        );
       }
     }
-    return { misses, worst };
-  }, [heights, width]);
+
+    // One pass = every case measured once. `measureBatch` is what a real list
+    // would call — one crossing for all of them instead of one each — so both
+    // are timed to show what the crossing actually costs.
+    const perPassMs = benchmark(() => {
+      for (const sample of SAMPLES) {
+        measure(sample.text, FONT, width);
+      }
+    });
+    const batchPassMs = benchmark(() => {
+      measureBatch(TEXTS, FONT, width);
+    });
+
+    return {
+      misses,
+      worst,
+      timing: {
+        perPassMs,
+        batchPassMs,
+        // Wall time from handing the renderer 56 probes to its last answer.
+        // Not a like-for-like rival to the numbers above and is not presented
+        // as one: it includes mounting views, shadow-tree layout and the trip
+        // back to JS. That gap is the whole reason this library exists.
+        layoutMs: Math.max(0, lastLayoutAt.current - startedWaitingAt),
+      },
+    };
+  }, [layouts, intrinsics, measuredCases, width, startedWaitingAt]);
 
   return (
     <View>
@@ -47,21 +218,43 @@ export function Summary({ width }: { width: number }) {
             key={sample.id}
             style={[FONT, styles.probe, { maxWidth: width }]}
             allowFontScaling={false}
-            onLayout={(event: LayoutChangeEvent) =>
-              onProbeLayout(sample.id, event.nativeEvent.layout.height)
-            }>
+            onLayout={(event: LayoutChangeEvent) => {
+              const { width: renderedWidth, height: renderedHeight } =
+                event.nativeEvent.layout;
+              onProbeLayout(sample.id, renderedWidth, renderedHeight);
+            }}>
             {sample.text}
           </Text>
         ))}
       </View>
 
+      {/* The same samples with no width to wrap against. */}
+      <View style={styles.offscreen} pointerEvents="none">
+        {SAMPLES.map(sample => (
+          <ScrollView
+            key={sample.id}
+            horizontal
+            scrollEnabled={false}
+            showsHorizontalScrollIndicator={false}>
+            <Text
+              style={FONT}
+              allowFontScaling={false}
+              onLayout={(event: LayoutChangeEvent) => {
+                onIntrinsicLayout(sample.id, event.nativeEvent.layout.width);
+              }}>
+              {sample.text}
+            </Text>
+          </ScrollView>
+        ))}
+      </View>
+
       <View style={styles.box}>
         <Text style={styles.title}>
-          height accuracy · {CASES} cases @ {width.toFixed(0)}pt
+          measurement accuracy · {CASES} cases @ {width.toFixed(0)}pt
         </Text>
         {report === null ? (
           <Text style={styles.line}>
-            measuring… {Object.keys(heights).length}/{CASES}
+            measuring… {measuredCases}/{CASES}
           </Text>
         ) : (
           <>
@@ -71,17 +264,64 @@ export function Summary({ width }: { width: number }) {
                 : `${report.misses.length}/${CASES} wrong`}
             </Text>
             {report.misses.map(miss => (
-              <Text key={miss.kind} style={styles.bad}>
-                {miss.kind} · real {miss.rendered.toFixed(2)} ·{' '}
-                {miss.delta > 0 ? '+' : ''}
-                {miss.delta.toFixed(2)}
+              <Text key={miss.id} style={styles.bad}>
+                {miss.kind} · real {miss.renderedWidth.toFixed(2)} ×{' '}
+                {miss.renderedHeight.toFixed(2)} ·{' '}
+                {miss.deltaWidth === null
+                  ? 'Δw n/a'
+                  : `Δw ${formatDelta(miss.deltaWidth)}`}{' '}
+                · Δh {formatDelta(miss.deltaHeight)} · Δwi{' '}
+                {miss.deltaIntrinsic === null
+                  ? '—'
+                  : formatDelta(miss.deltaIntrinsic)}
               </Text>
             ))}
           </>
         )}
       </View>
+
+      {report === null ? null : (
+        <View style={[styles.box, styles.timingBox]}>
+          <Text style={styles.title}>
+            timing · {CASES} cases · median of {PASSES} passes
+          </Text>
+          <Text style={styles.line}>
+            measure() ×{CASES}{'  '}
+            {formatMs(report.timing.perPassMs)} ·{' '}
+            {formatMs(report.timing.perPassMs / CASES)}/case
+          </Text>
+          <Text style={styles.line}>
+            measureBatch(){'  '}
+            {formatMs(report.timing.batchPassMs)} ·{' '}
+            {formatMs(report.timing.batchPassMs / CASES)}/case
+          </Text>
+          <Text style={styles.line}>
+            onLayout, all {CASES} rendered{'  '}
+            {formatMs(report.timing.layoutMs)}
+          </Text>
+          <Text style={styles.note}>
+            The first two time a whole pass over every case, then divide — a
+            single sub-millisecond call is the same order as the clock's own
+            resolution, so timing one would report the clock. onLayout is wall
+            time instead: mounting views, laying out the shadow tree, returning
+            to JS. It is the wait this library removes, not a rival to it.
+          </Text>
+        </View>
+      )}
     </View>
   );
+}
+
+/** Same rule as `MeasuredRow`: a delta that rounds to zero prints as `0`. */
+function formatDelta(value: number): string {
+  const rounded = Math.round(value * 100) / 100;
+  if (rounded === 0) {
+    return '0';
+  }
+  const text = Number.isInteger(rounded)
+    ? rounded.toFixed(0)
+    : rounded.toFixed(2);
+  return rounded > 0 ? `+${text}` : text;
 }
 
 const styles = StyleSheet.create({
@@ -117,5 +357,14 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontFamily: 'Menlo',
     lineHeight: 16,
+  },
+  timingBox: {
+    marginTop: 8,
+  },
+  note: {
+    color: '#6b7684',
+    fontSize: 10,
+    lineHeight: 14,
+    marginTop: 4,
   },
 });
