@@ -2,6 +2,15 @@
 
 Know what a `<Text>` will render as, before it renders.
 
+[npm package](https://www.npmjs.com/package/@nexigen/react-native-pre-text) ·
+[nexigenjs/react-native-pre-text](https://github.com/nexigenjs/react-native-pre-text)
+
+
+
+https://github.com/user-attachments/assets/9f1eaff4-9d9f-42c5-a6fe-6511f61a7d8f
+
+
+
 `measure()` returns the height, line count and widest line for a string — the
 same numbers `onLayout` reports afterwards. That lets a list size its cells
 before mounting them, so virtualisation never has to guess and never jumps.
