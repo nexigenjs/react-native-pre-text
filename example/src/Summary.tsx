@@ -8,19 +8,14 @@ import {
 } from 'react-native';
 import {
   clearCache,
+  getFontMetrics,
   measure,
   measureBatch,
   measureWidth,
 } from '@nexigen/react-native-pre-text';
 
 import { SAMPLES } from './corpus';
-import {
-  FONT,
-  TOLERANCE,
-  formatMs,
-  now,
-  useRestartingClock,
-} from './metrics';
+import { FONT, TOLERANCE, formatMs, now, useRestartingClock } from './metrics';
 
 const TEXTS = SAMPLES.map(sample => sample.text);
 
@@ -119,8 +114,7 @@ export function Summary({ width }: { width: number }) {
   const onIntrinsicLayout = useCallback((id: string, rendered: number) => {
     lastLayoutAt.current = now();
     setIntrinsics(previous =>
-      previous[id] !== undefined &&
-      Math.abs(previous[id]! - rendered) < 0.01
+      previous[id] !== undefined && Math.abs(previous[id]! - rendered) < 0.01
         ? previous
         : { ...previous, [id]: rendered },
     );
@@ -136,6 +130,36 @@ export function Summary({ width }: { width: number }) {
       0,
     );
   }, [layouts, intrinsics, width]);
+
+  /**
+   * `FONT`'s vertical metrics, and the one claim about them worth failing on.
+   *
+   * Independent of the probes above and of `width` — nothing here wraps, so
+   * this needs no `onLayout` to arrive and renders on the first pass. `FONT` is
+   * a module constant, hence the empty dependency list.
+   */
+  const fontMetrics = useMemo(() => {
+    const metrics = getFontMetrics(FONT);
+    const inked = metrics.ascender + metrics.descender;
+    const box = FONT.lineHeight;
+    return {
+      ...metrics,
+      inked,
+      /**
+       * A `lineHeight` shorter than the font's own ascent plus descent is what
+       * clips diacritics. Both platforms pin the line box rather than grow it —
+       * `CustomLineHeightSpan` on Android, `min`/`maximumLineHeight` on iOS — so
+       * what gives way is the glyph, not the box. Vacuously true with no
+       * `lineHeight` set, because then nothing is pinning anything.
+       */
+      fits: box === undefined || inked <= box,
+      /** Weak on purpose — see the note rendered under the panel. */
+      ordered:
+        metrics.xHeight > 0 &&
+        metrics.xHeight < metrics.capHeight &&
+        metrics.capHeight <= metrics.ascender,
+    };
+  }, []);
 
   const report = useMemo(() => {
     if (measuredCases < CASES) {
@@ -167,8 +191,7 @@ export function Summary({ width }: { width: number }) {
         Number.isFinite(deltaHeight) &&
         Math.abs(deltaHeight) <= TOLERANCE &&
         (deltaWidth === null ||
-          (Number.isFinite(deltaWidth) &&
-            Math.abs(deltaWidth) <= TOLERANCE)) &&
+          (Number.isFinite(deltaWidth) && Math.abs(deltaWidth) <= TOLERANCE)) &&
         (deltaIntrinsic === null ||
           (Number.isFinite(deltaIntrinsic) &&
             Math.abs(deltaIntrinsic) <= TOLERANCE));
@@ -244,7 +267,8 @@ export function Summary({ width }: { width: number }) {
               const { width: renderedWidth, height: renderedHeight } =
                 event.nativeEvent.layout;
               onProbeLayout(sample.id, renderedWidth, renderedHeight);
-            }}>
+            }}
+          >
             {sample.text}
           </Text>
         ))}
@@ -257,13 +281,15 @@ export function Summary({ width }: { width: number }) {
             key={sample.id}
             horizontal
             scrollEnabled={false}
-            showsHorizontalScrollIndicator={false}>
+            showsHorizontalScrollIndicator={false}
+          >
             <Text
               style={FONT}
               allowFontScaling={false}
               onLayout={(event: LayoutChangeEvent) => {
                 onIntrinsicLayout(sample.id, event.nativeEvent.layout.width);
-              }}>
+              }}
+            >
               {sample.text}
             </Text>
           </ScrollView>
@@ -282,7 +308,9 @@ export function Summary({ width }: { width: number }) {
           <>
             <Text style={report.misses.length === 0 ? styles.ok : styles.bad}>
               {report.misses.length === 0
-                ? `all ${CASES} match onLayout · worst gap ${report.worst.toFixed(3)}pt`
+                ? `all ${CASES} match onLayout · worst gap ${report.worst.toFixed(
+                    3,
+                  )}pt`
                 : `${report.misses.length}/${CASES} wrong`}
             </Text>
             {report.misses.map(miss => (
@@ -302,8 +330,50 @@ export function Summary({ width }: { width: number }) {
         )}
       </View>
 
+      <View style={[styles.box, styles.stackedBox]}>
+        <Text style={styles.title}>
+          font metrics · {FONT.fontFamily} {FONT.fontSize}
+        </Text>
+        <Text style={styles.line}>
+          ascender {fontMetrics.ascender.toFixed(2)} · descender{' '}
+          {fontMetrics.descender.toFixed(2)} · lineGap{' '}
+          {fontMetrics.lineGap.toFixed(2)}
+        </Text>
+        <Text style={styles.line}>
+          capHeight {fontMetrics.capHeight.toFixed(2)} · xHeight{' '}
+          {fontMetrics.xHeight.toFixed(2)} · lineHeight{' '}
+          {fontMetrics.lineHeight.toFixed(2)}
+        </Text>
+        <Text style={fontMetrics.fits ? styles.ok : styles.bad}>
+          {FONT.lineHeight === undefined
+            ? `ascender + descender ${fontMetrics.inked.toFixed(2)} · no lineHeight to pin the box`
+            : `ascender + descender ${fontMetrics.inked.toFixed(2)} ${
+                fontMetrics.fits ? 'fits' : 'overflows'
+              } lineHeight ${FONT.lineHeight.toFixed(2)}${
+                fontMetrics.fits ? '' : ' · glyphs clip'
+              }`}
+        </Text>
+        <Text style={fontMetrics.ordered ? styles.line : styles.bad}>
+          {fontMetrics.ordered
+            ? 'xHeight < capHeight ≤ ascender'
+            : 'ordering broken · xHeight/capHeight are not heights'}
+        </Text>
+        <Text style={styles.note}>
+          Vertical metrics, not layout: cap-height alignment, leading-trim, and
+          checking that a hand-picked lineHeight actually clears the font. iOS
+          reads capHeight and xHeight from the font's OS/2 table; Android
+          exposes no such API and measures the ink box of "T" and "x" the way
+          RN's own onTextLayout does, so expect the two platforms to differ by a
+          fraction here — that gap is RN's, not this library's. The ordering
+          check above is deliberately weak: for these two glyphs the advance
+          width and the ink height land in the same range, which is exactly why
+          returning the advance once passed for working. Comparing this panel
+          between iOS and Android is the signal that actually discriminates.
+        </Text>
+      </View>
+
       {report === null ? null : (
-        <View style={[styles.box, styles.timingBox]}>
+        <View style={[styles.box, styles.stackedBox]}>
           <Text style={styles.title}>
             timing · {CASES} cases · median of {PASSES} passes
           </Text>
@@ -387,7 +457,8 @@ const styles = StyleSheet.create({
     fontFamily: 'Menlo',
     lineHeight: 16,
   },
-  timingBox: {
+  /** Any panel below the first one. */
+  stackedBox: {
     marginTop: 8,
   },
   note: {

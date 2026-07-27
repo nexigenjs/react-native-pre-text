@@ -1,5 +1,6 @@
 package com.margelo.nitro.pretext
 
+import android.content.res.AssetManager
 import android.graphics.Typeface
 import android.os.Build
 import android.text.BoringLayout
@@ -9,7 +10,10 @@ import android.text.StaticLayout
 import android.text.TextPaint
 import android.text.style.LineHeightSpan
 import android.graphics.Paint
+import android.graphics.Rect
 import com.facebook.proguard.annotations.DoNotStrip
+import com.facebook.react.common.assets.ReactFontManager
+import com.margelo.nitro.NitroModules
 import kotlin.math.ceil
 import kotlin.math.floor
 
@@ -57,6 +61,15 @@ class PreText : HybridPreTextSpec() {
 
     /** Per generation. Two are live at once, so the ceiling is 1024 entries. */
     const val CACHE_CAP = 512
+
+    /**
+     * RN's own probe glyphs and amplification factor, from `FontMetricsUtil`.
+     * "T" rather than "H" only because that is the glyph RN picks, and matching
+     * it is worth more here than the marginally taller letter.
+     */
+    const val CAP_HEIGHT_GLYPH = "T"
+    const val X_HEIGHT_GLYPH = "x"
+    const val GLYPH_AMPLIFICATION = 100f
   }
 
   // MARK: - Public API
@@ -94,8 +107,8 @@ class PreText : HybridPreTextSpec() {
     FontMetrics(
       ascender = (-metrics.ascent).toDouble(),
       descender = metrics.descent.toDouble(),
-      xHeight = paint.measureText("x").toDouble(),
-      capHeight = paint.measureText("H").toDouble(),
+      xHeight = glyphHeight(paint, X_HEIGHT_GLYPH),
+      capHeight = glyphHeight(paint, CAP_HEIGHT_GLYPH),
       lineGap = metrics.leading.toDouble(),
       lineHeight = spec.lineHeight ?: (metrics.descent - metrics.ascent).toDouble()
     )
@@ -347,6 +360,29 @@ class PreText : HybridPreTextSpec() {
     return paint
   }
 
+  /**
+   * Height of a glyph above the baseline, in the paint's own units.
+   *
+   * The obvious call, `measureText`, answers the horizontal advance — the wrong
+   * dimension outright, and landing in the right ballpark is exactly what let it
+   * pass for working. Android exposes no cap or x-height, so the inked bounding
+   * box is as close as the platform gets; it is also precisely what RN's
+   * `onTextLayout` reports here, which makes it the right answer for a library
+   * whose contract is to agree with RN.
+   *
+   * Measuring at 100x and dividing back recovers what the integer `Rect` would
+   * otherwise round away; text size scales linearly, so the factor cancels
+   * exactly. iOS still reads `capHeight`/`xHeight` from the font's OS/2 table,
+   * so the two platforms can differ by a fraction — a designed metric is not an
+   * inked extent — but that gap is RN's own, and both now answer in height.
+   */
+  private fun glyphHeight(paint: TextPaint, glyph: String): Double {
+    val amplified = TextPaint(paint).apply { textSize *= GLYPH_AMPLIFICATION }
+    val bounds = Rect()
+    amplified.getTextBounds(glyph, 0, glyph.length, bounds)
+    return bounds.height() / GLYPH_AMPLIFICATION.toDouble()
+  }
+
   private fun featureFor(variant: String): String? = when (variant) {
     "small-caps" -> "'smcp'"
     "tabular-nums" -> "'tnum'"
@@ -356,6 +392,27 @@ class PreText : HybridPreTextSpec() {
     else -> null
   }
 
+  /**
+   * A port of RN's `ReactTypefaceUtils.applyStyles` — the function
+   * `CustomStyleSpan` calls on the very paint that measures a real `<Text>`.
+   *
+   * Delegating to `ReactFontManager` is the point of this function, not a
+   * detail. A font shipped in `assets/fonts/` exists nowhere else and is
+   * reachable only through `Typeface.createFromAsset`, which is what the
+   * manager tries first. `Typeface.create(family, style)` searches the *system*
+   * families, misses it, and — since it never returns null — quietly answers
+   * with the default. Measuring that way yields confident numbers taken off a
+   * font that is not the one being drawn, and with a `lineHeight` span pinning
+   * row height the error surfaces as a whole extra or missing line rather than
+   * as a visible fraction of one. For a genuine system family the manager falls
+   * through to the same `Typeface.create`, so that path is unchanged.
+   *
+   * Note what is deliberately absent: no second `Typeface.create(base, weight,
+   * italic)` layered over a named family. RN resolves a family through the
+   * manager and stops there, so on Android every weight below 700 collapses to
+   * the regular face. Synthesising the in-between weight here would measure a
+   * font the renderer never produces.
+   */
   private fun resolveTypeface(spec: TextSpec): Typeface {
     val family = spec.fontFamily
     val weight = mapWeight(spec.fontWeight)
@@ -363,27 +420,33 @@ class PreText : HybridPreTextSpec() {
     val key = "${family ?: "default"}_${weight}_${italic}"
     typefaceCache[key]?.let { return it }
 
-    val base = if (family != null) {
-      Typeface.create(family, Typeface.NORMAL)
-    } else {
-      Typeface.DEFAULT
+    val assets = assetManager()
+    val style = ReactFontManager.TypefaceStyle(weight, italic)
+    val resolved = when {
+      family == null -> style.apply(Typeface.DEFAULT)
+      // The same singleton RN measures and renders through, so this is not a
+      // parallel font cache — it is the same Typeface instance the view gets.
+      assets != null -> ReactFontManager.getInstance().getTypeface(family, style, assets)
+      // No context yet, so no assets to search. Resolve locally instead of
+      // through the manager, which accepts a null `AssetManager` but would then
+      // cache the system fallback under this family for the rest of the
+      // process — and that cache belongs to the renderer as much as to us.
+      // `nearestStyle` is what the manager's own fallback passes here.
+      else -> Typeface.create(family, style.nearestStyle)
     }
 
-    val resolved = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-      Typeface.create(base, weight, italic)
-    } else {
-      val style = when {
-        weight >= 700 && italic -> Typeface.BOLD_ITALIC
-        weight >= 700 -> Typeface.BOLD
-        italic -> Typeface.ITALIC
-        else -> Typeface.NORMAL
-      }
-      Typeface.create(base, style)
+    // Same reasoning one layer up: an answer reached without assets is worth
+    // returning, not worth keeping. Caching it would pin the fallback font past
+    // the moment the real one becomes reachable.
+    if (family == null || assets != null) {
+      typefaceCache[key] = resolved
     }
-
-    typefaceCache[key] = resolved
     return resolved
   }
+
+  /** Null until Nitro has a React context — see [resolveTypeface]. */
+  private fun assetManager(): AssetManager? =
+    NitroModules.applicationContext?.assets
 
   private fun mapWeight(weight: String?): Int = when (weight) {
     "100" -> 100

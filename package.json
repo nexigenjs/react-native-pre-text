@@ -1,6 +1,6 @@
 {
   "name": "@nexigen/react-native-pre-text",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Know what a React Native <Text> will render as, before it renders. Native measurement on iOS TextKit and Android StaticLayout, over Nitro Modules.",
   "license": "MIT",
   "repository": {
