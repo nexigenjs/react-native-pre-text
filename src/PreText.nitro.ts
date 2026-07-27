@@ -121,6 +121,14 @@ export interface PreText
 
   getFontMetrics(spec: TextSpec): FontMetrics;
 
-  /** Call after a font finishes loading or the system font scale changes. */
+  /**
+   * Drops the resolved fonts and every cached measurement.
+   *
+   * Call after a font finishes loading or the system font scale changes — both
+   * change what the same inputs would measure to, and a cache keyed on those
+   * inputs cannot see it happen. Nothing else invalidates: the key already
+   * covers every field the platform reads, so a different style or width is a
+   * different entry rather than a stale one.
+   */
   clearCache(): void;
 }

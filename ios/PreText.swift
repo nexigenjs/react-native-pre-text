@@ -6,6 +6,69 @@ import UIKit
 class PreText: HybridPreTextSpec {
   private var fontCache: [String: UIFont] = [:]
 
+  /// Per generation. Two are live at once, so the ceiling is 1024 entries.
+  private static let cacheCap = 512
+
+  /// Measurement cache, two generations giving each entry one second chance.
+  ///
+  /// Reads check the newer generation, then the older; a hit in the older one
+  /// promotes it back. When the newer fills, it ages wholesale into the older
+  /// slot and the previous older generation is dropped. So what survives is
+  /// what was *read*, not what was recently written.
+  ///
+  /// This is a deliberate approximation of LRU rather than the real thing —
+  /// React Native's own `TextMeasureCache` keeps a strict LRU with a linked
+  /// list, which is exact and equally O(1). The trade taken here is a coarser
+  /// policy for a much smaller one: no list to maintain, two dictionaries and
+  /// one counter. The costs are real and accepted — the ceiling is 2x the cap
+  /// rather than the cap, there is no recency ordering *within* a generation,
+  /// and an entry written just before an aging gets less grace than one written
+  /// just after. With a list window of tens of rows against a 512 cap, aging is
+  /// rare enough that none of that is reachable in practice.
+  ///
+  /// None of it can change a result. The key covers everything the platform
+  /// reads, so an entry is only ever returned for inputs that would have
+  /// produced it — this buys time, never accuracy.
+  private var hotCache: [MeasureKey: TextMeasurement] = [:]
+  private var coldCache: [MeasureKey: TextMeasurement] = [:]
+
+  /// The layout graph and both caches are shared mutable state, while Nitro
+  /// makes no promise about which thread calls in. Uncontended locking costs
+  /// tens of nanoseconds against a measurement three orders of magnitude
+  /// larger, so serialising is free here in a way that a data race is not.
+  private let lock = NSLock()
+
+  private lazy var engine = LayoutEngine()
+
+  private struct MeasureKey: Hashable {
+    let text: String
+    let spec: String
+    let maxWidth: Double
+    let maxLines: Double
+    let pixelRatio: Double
+  }
+
+  /// One TextKit graph, reused across calls.
+  ///
+  /// Allocating `NSTextStorage`, `NSTextContainer` and `NSLayoutManager` per
+  /// call dominates a sub-millisecond measurement — TextKit's line breaking is
+  /// the cheap part. Reuse is invisible in the output: the same engine still
+  /// lays out the same whole string against the same container.
+  private final class LayoutEngine {
+    let storage = NSTextStorage()
+    let container = NSTextContainer(size: .zero)
+    let manager = NSLayoutManager()
+
+    init() {
+      // RN renders with no inset; leaving TextKit's default 5pt padding here
+      // would make every measurement 10pt narrower than the real thing.
+      container.lineFragmentPadding = 0
+      manager.usesFontLeading = false
+      manager.addTextContainer(container)
+      storage.addLayoutManager(manager)
+    }
+  }
+
   // MARK: - Public API
 
   func measure(
@@ -13,7 +76,12 @@ class PreText: HybridPreTextSpec {
     spec: TextSpec,
     options: MeasureOptions
   ) throws -> TextMeasurement {
-    return layoutMeasurement(text: text, spec: spec, options: options)
+    lock.lock()
+    defer { lock.unlock() }
+
+    return cached(text: text, spec: spec, specKey: layoutKey(spec), options: options) {
+      self.attributes(for: spec)
+    }
   }
 
   func measureBatch(
@@ -21,18 +89,31 @@ class PreText: HybridPreTextSpec {
     spec: TextSpec,
     options: MeasureOptions
   ) throws -> [TextMeasurement] {
-    // Identical across the batch, so resolve once.
-    let attributes = self.attributes(for: spec)
+    lock.lock()
+    defer { lock.unlock() }
+
+    let specKey = layoutKey(spec)
+    // Resolved at most once for the batch, and not at all when every text is
+    // already cached.
+    var resolved: [NSAttributedString.Key: Any]?
+    let attributes: () -> [NSAttributedString.Key: Any] = {
+      if let existing = resolved {
+        return existing
+      }
+      let built = self.attributes(for: spec)
+      resolved = built
+      return built
+    }
+
     return texts.map { text in
-      measurement(
-        for: transformed(text, spec: spec),
-        attributes: attributes,
-        options: options
-      )
+      cached(text: text, spec: spec, specKey: specKey, options: options, attributes: attributes)
     }
   }
 
   func getFontMetrics(spec: TextSpec) throws -> FontMetrics {
+    lock.lock()
+    defer { lock.unlock() }
+
     let font = resolveFont(spec)
     return FontMetrics(
       ascender: Double(font.ascender),
@@ -45,22 +126,72 @@ class PreText: HybridPreTextSpec {
   }
 
   func clearCache() throws {
+    lock.lock()
+    defer { lock.unlock() }
+
     fontCache.removeAll()
+    hotCache.removeAll()
+    coldCache.removeAll()
+  }
+
+  // MARK: - Cache
+
+  /// Caller must hold `lock`.
+  private func cached(
+    text: String,
+    spec: TextSpec,
+    specKey: String,
+    options: MeasureOptions,
+    attributes: () -> [NSAttributedString.Key: Any]
+  ) -> TextMeasurement {
+    let key = MeasureKey(
+      text: text,
+      spec: specKey,
+      maxWidth: options.maxWidth,
+      maxLines: options.maxLines ?? 0,
+      pixelRatio: options.pixelRatio ?? 0
+    )
+
+    if let hit = hotCache[key] {
+      return hit
+    }
+    if let hit = coldCache[key] {
+      // Promote, so something still in use survives the next aging.
+      hotCache[key] = hit
+      return hit
+    }
+
+    let result = measurement(
+      for: transformed(text, spec: spec),
+      attributes: attributes(),
+      options: options
+    )
+
+    hotCache[key] = result
+    if hotCache.count >= Self.cacheCap {
+      coldCache = hotCache
+      hotCache = [:]
+    }
+    return result
+  }
+
+  /// Everything that can move a break or change a line's height on iOS.
+  ///
+  /// Wider than `cacheKey`, which only has to identify a `UIFont`:
+  /// `lineHeight` and `letterSpacing` resolve the same font but measure
+  /// differently. Android-only fields are left out deliberately — folding them
+  /// in would split entries that produce identical results here.
+  private func layoutKey(_ spec: TextSpec) -> String {
+    return [
+      cacheKey(spec),
+      spec.lineHeight.map { String($0) } ?? "",
+      spec.letterSpacing.map { String($0) } ?? "",
+      spec.textTransform ?? "",
+      spec.writingDirection ?? "",
+    ].joined(separator: "_")
   }
 
   // MARK: - Measurement
-
-  private func layoutMeasurement(
-    text: String,
-    spec: TextSpec,
-    options: MeasureOptions
-  ) -> TextMeasurement {
-    return measurement(
-      for: transformed(text, spec: spec),
-      attributes: attributes(for: spec),
-      options: options
-    )
-  }
 
   private func measurement(
     for text: String,
@@ -68,20 +199,20 @@ class PreText: HybridPreTextSpec {
     options: MeasureOptions
   ) -> TextMeasurement {
     let maxLines = Int(options.maxLines ?? 0)
-    let storage = NSTextStorage(string: text, attributes: attributes)
-    let container = NSTextContainer(
-      size: CGSize(width: options.maxWidth, height: .greatestFiniteMagnitude)
+    let container = engine.container
+    let manager = engine.manager
+
+    // `lineFragmentPadding` and `usesFontLeading` are set once, in the engine's
+    // initialiser — only what varies per call is assigned here.
+    container.size = CGSize(
+      width: options.maxWidth,
+      height: .greatestFiniteMagnitude
     )
-    // RN renders with no inset; leaving TextKit's default 5pt padding here
-    // would make every measurement 10pt narrower than the real thing.
-    container.lineFragmentPadding = 0
     container.lineBreakMode = maxLines > 0 ? .byTruncatingTail : .byWordWrapping
     container.maximumNumberOfLines = maxLines
-
-    let manager = NSLayoutManager()
-    manager.usesFontLeading = false
-    manager.addTextContainer(container)
-    storage.addLayoutManager(manager)
+    engine.storage.setAttributedString(
+      NSAttributedString(string: text, attributes: attributes)
+    )
 
     manager.ensureLayout(for: container)
 

@@ -24,9 +24,39 @@ class PreText : HybridPreTextSpec() {
 
   private val typefaceCache = HashMap<String, Typeface>()
 
+  /**
+   * Measurement cache, two generations giving each entry one second chance.
+   *
+   * Reads check the newer generation, then the older; a hit in the older one
+   * promotes it back. When the newer fills, it ages wholesale into the older
+   * slot and the previous older generation is dropped — so what survives is
+   * what was *read*, not what was recently written.
+   *
+   * A deliberate approximation of LRU rather than the real thing. React
+   * Native's own `TextMeasureCache` keeps a strict LRU, which is exact and
+   * equally O(1); the trade taken here is a coarser policy for a much smaller
+   * one. The costs are real and accepted: the ceiling is 2x the cap, there is
+   * no recency ordering within a generation, and an entry written just before
+   * an aging gets less grace than one written just after. Against a 512 cap and
+   * a list window of tens of rows, aging is rare enough that none of it is
+   * reachable in practice.
+   *
+   * The key covers everything `StaticLayout` reads, so an entry is only ever
+   * returned for inputs that would have produced it. This buys time, not
+   * accuracy.
+   */
+  private var hotCache = HashMap<String, TextMeasurement>()
+  private var coldCache = HashMap<String, TextMeasurement>()
+
+  /** Nitro makes no promise about the calling thread, and this state is shared. */
+  private val lock = Any()
+
   private companion object {
     /** Matches `UNBOUNDED_WIDTH` on the JS side. */
     const val MAX_LAYOUT_WIDTH = 1_000_000.0
+
+    /** Per generation. Two are live at once, so the ceiling is 1024 entries. */
+    const val CACHE_CAP = 512
   }
 
   // MARK: - Public API
@@ -35,27 +65,33 @@ class PreText : HybridPreTextSpec() {
     text: String,
     spec: TextSpec,
     options: MeasureOptions
-  ): TextMeasurement {
+  ): TextMeasurement = synchronized(lock) {
     val density = densityOf(options)
-    return measureWith(buildPaint(spec, density), text, spec, options, density)
+    val specKey = layoutKey(spec, options)
+    cached(text, spec, specKey, options, density) { buildPaint(spec, density) }
   }
 
   override fun measureBatch(
     texts: Array<String>,
     spec: TextSpec,
     options: MeasureOptions
-  ): Array<TextMeasurement> {
+  ): Array<TextMeasurement> = synchronized(lock) {
     val density = densityOf(options)
-    val paint = buildPaint(spec, density)
-    return Array(texts.size) { i ->
-      measureWith(paint, texts[i], spec, options, density)
+    val specKey = layoutKey(spec, options)
+    // Built at most once for the batch, and not at all on a full cache hit.
+    var paint: TextPaint? = null
+    Array(texts.size) { i ->
+      cached(texts[i], spec, specKey, options, density) {
+        val existing = paint
+        existing ?: buildPaint(spec, density).also { paint = it }
+      }
     }
   }
 
-  override fun getFontMetrics(spec: TextSpec): FontMetrics {
+  override fun getFontMetrics(spec: TextSpec): FontMetrics = synchronized(lock) {
     val paint = buildPaint(spec, 1.0)
     val metrics = paint.fontMetrics
-    return FontMetrics(
+    FontMetrics(
       ascender = (-metrics.ascent).toDouble(),
       descender = metrics.descent.toDouble(),
       xHeight = paint.measureText("x").toDouble(),
@@ -65,9 +101,67 @@ class PreText : HybridPreTextSpec() {
     )
   }
 
-  override fun clearCache() {
+  override fun clearCache() = synchronized(lock) {
     typefaceCache.clear()
+    hotCache.clear()
+    coldCache.clear()
   }
+
+  // MARK: - Cache
+
+  /** Caller must hold [lock]. */
+  private fun cached(
+    text: String,
+    spec: TextSpec,
+    specKey: String,
+    options: MeasureOptions,
+    density: Double,
+    paint: () -> TextPaint
+  ): TextMeasurement {
+    // NUL separates the two halves so no text can forge a spec key.
+    val key = "$specKey\u0000$text"
+
+    hotCache[key]?.let { return it }
+    coldCache[key]?.let {
+      // Promote, so something still in use survives the next aging.
+      hotCache[key] = it
+      return it
+    }
+
+    val result = measureWith(paint(), text, spec, options, density)
+
+    hotCache[key] = result
+    if (hotCache.size >= CACHE_CAP) {
+      coldCache = hotCache
+      hotCache = HashMap()
+    }
+    return result
+  }
+
+  /**
+   * Everything that can move a break or change a line's height on Android —
+   * including `includeFontPadding`, `textBreakStrategy` and
+   * `hyphenationFrequency`, which are ignored on iOS but decide the layout
+   * here.
+   */
+  private fun layoutKey(spec: TextSpec, options: MeasureOptions): String = listOf(
+    spec.fontFamily ?: "",
+    spec.fontSize.toString(),
+    spec.fontWeight ?: "",
+    spec.fontStyle ?: "",
+    spec.lineHeight?.toString() ?: "",
+    spec.letterSpacing?.toString() ?: "",
+    spec.textTransform ?: "",
+    (spec.fontVariant ?: emptyArray()).joinToString(","),
+    scaleOf(spec).toString(),
+    spec.writingDirection ?: "",
+    (spec.includeFontPadding ?: true).toString(),
+    spec.textBreakStrategy ?: "",
+    spec.hyphenationFrequency ?: "",
+    options.maxWidth.toString(),
+    (options.maxLines ?: 0.0).toString(),
+    (options.pixelRatio ?: 1.0).toString()
+  ).joinToString("_")
 
   // MARK: - Measurement
 

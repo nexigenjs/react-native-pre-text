@@ -134,6 +134,65 @@ measureHeight(text, style, width, { fontScale: PixelRatio.getFontScale() });
 
 If your `<Text>` sets `allowFontScaling={false}`, leave `fontScale` alone.
 
+## Performance
+
+Two things keep the per-call cost down, and neither can change a result:
+
+- **One reused layout graph.** On iOS `NSTextStorage`, `NSTextContainer` and
+  `NSLayoutManager` are built once and reused, because allocating them per call
+  dominates a sub-millisecond measurement — TextKit's line breaking is the cheap
+  part.
+- **A measurement cache**, two generations of 512 entries. Reads check the newer
+  generation, then the older; a hit in the older one promotes it back. When the
+  newer fills it ages wholesale and the previous older generation is dropped, so
+  what survives is what was *read*. The key covers every field the platform
+  reads, so an entry is only ever returned for inputs that would have produced
+  it. In a list the style and width are constant while rows repeat across
+  re-renders and scrollback, which is where the hit rate lands.
+
+  This is a second-chance approximation of LRU, not the real thing — React
+  Native keeps a strict LRU in `TextMeasureCache`, which is exact at the same
+  O(1). The trade is a coarser policy for a much smaller one: two dictionaries
+  and a counter, no linked list to maintain. It costs a ceiling of 1024 rather
+  than 512, no recency ordering within a generation, and slightly arbitrary
+  lifetimes for entries written just before an aging. Against a window of tens
+  of rows, aging is rare enough that none of that is reachable.
+
+`measureBatch` pays the JS/native crossing once for the whole list and resolves
+the font once, so prefer it when sizing more than a couple of rows.
+
+Call `clearCache()` when a font finishes loading or the system font scale
+changes. Those change what the same inputs measure to, which a cache keyed on
+inputs cannot notice. Nothing else needs invalidating.
+
+`example/` prints the timings — a whole pass over the corpus, median of ten,
+both one call at a time and via `measureBatch`. It times a pass rather than a
+single call deliberately: one measurement is the same order as
+`performance.now()`'s own resolution, so timing one reports the clock, and
+dividing that by the case count manufactures numbers like 0.0002 ms.
+
+### What this deliberately does not do
+
+A faster design exists: segment the text, measure each segment once, cache the
+widths and add them up in JS to decide where lines break. That is how the
+browser-oriented [`pretext`](https://github.com/chenglou/pretext) works, and it
+has to — in a browser you cannot ask the layout engine where it would break
+without forcing a reflow, so canvas widths plus JS arithmetic is the only way
+out. Here there is no reflow to avoid, and summing cached segment widths would
+give up the guarantee this library exists for:
+
+- Android's `<Text>` defaults to `textBreakStrategy: highQuality`, which
+  optimises breaks across the whole paragraph. Greedy arithmetic over segment
+  widths does not approximate that, it disagrees with it.
+- Kerning and ligatures across a segment boundary vanish when widths are summed
+  rather than measured together.
+- Script-specific minimum line heights, like the Thai case under
+  [Known limits](#known-limits), are the platform's decision and are simply
+  absent from the arithmetic.
+
+Caching whole measurements gets the repeat-call cost without touching any of
+that, because a memoised pure function returns what the function would have.
+
 ## Nitro versions
 
 The package ships pre-generated Nitro glue in `nitrogen/`, and that glue is
