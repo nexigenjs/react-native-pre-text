@@ -1,0 +1,71 @@
+{
+  "name": "react-native-pre-text",
+  "version": "0.1.0",
+  "description": "Know what a React Native <Text> will render as, before it renders. Native measurement on iOS TextKit and Android StaticLayout, over Nitro Modules.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/nexigenjs/react-native-pre-text.git"
+  },
+  "homepage": "https://github.com/nexigenjs/react-native-pre-text",
+  "bugs": {
+    "url": "https://github.com/nexigenjs/react-native-pre-text/issues"
+  },
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "react-native": "src/index.ts",
+  "files": [
+    "src/",
+    "ios/",
+    "android/",
+    "nitrogen/",
+    "nitro.json",
+    "PreText.podspec",
+    "README.md",
+    "LICENSE",
+    "!android/build",
+    "!android/.cxx"
+  ],
+  "keywords": [
+    "react-native",
+    "nitro-modules",
+    "text-measurement",
+    "text-height",
+    "onlayout",
+    "virtualization",
+    "flatlist",
+    "flashlist",
+    "ios",
+    "android"
+  ],
+  "scripts": {
+    "codegen": "nitrogen",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src"
+  },
+  "peerDependencies": {
+    "react": "*",
+    "react-native": "*",
+    "react-native-nitro-modules": ">=0.36.0"
+  },
+  "devDependencies": {
+    "@react-native/eslint-config": "0.86.0",
+    "@react-native/typescript-config": "0.86.0",
+    "@types/react": "^19.2.0",
+    "eslint": "^8.19.0",
+    "nitrogen": "^0.36.1",
+    "prettier": "2.8.8",
+    "react": "19.2.3",
+    "react-native": "0.86.0",
+    "react-native-nitro-modules": "0.36.1",
+    "typescript": "^5.8.3"
+  },
+  "engines": {
+    "node": ">= 22.11.0"
+  },
+  "create-react-native-library": {
+    "type": "nitro-module",
+    "languages": "kotlin-swift",
+    "version": "0.63.0"
+  }
+}
