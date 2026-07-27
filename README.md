@@ -1,4 +1,4 @@
-# react-native-pre-text
+# @nexigen/react-native-pre-text
 
 Know what a `<Text>` will render as, before it renders.
 
@@ -7,7 +7,7 @@ same numbers `onLayout` reports afterwards. That lets a list size its cells
 before mounting them, so virtualisation never has to guess and never jumps.
 
 ```tsx
-import { measureHeight } from 'react-native-pre-text';
+import { measureHeight } from '@nexigen/react-native-pre-text';
 
 const STYLE = { fontFamily: 'System', fontSize: 16, lineHeight: 24 };
 
@@ -70,7 +70,7 @@ against.
 ## Install
 
 ```sh
-npm install react-native-pre-text react-native-nitro-modules
+npm install @nexigen/react-native-pre-text react-native-nitro-modules
 cd ios && pod install
 ```
 
@@ -166,10 +166,11 @@ changes. Those change what the same inputs measure to, which a cache keyed on
 inputs cannot notice. Nothing else needs invalidating.
 
 `example/` prints the timings — a whole pass over the corpus, median of ten,
-both one call at a time and via `measureBatch`. It times a pass rather than a
-single call deliberately: one measurement is the same order as
-`performance.now()`'s own resolution, so timing one reports the clock, and
-dividing that by the case count manufactures numbers like 0.0002 ms.
+measured cold with the cache cleared before each pass, again with it warm, and
+once via `measureBatch`. It times a pass rather than a single call deliberately:
+one measurement is the same order as `performance.now()`'s own resolution, so
+timing one reports the clock, and dividing that by the case count manufactures
+numbers like 0.0002 ms.
 
 ### What this deliberately does not do
 
@@ -199,7 +200,7 @@ The package ships pre-generated Nitro glue in `nitrogen/`, and that glue is
 written against Nitro's internal API, not a stable contract. The floor is
 therefore a hard one; there is no ceiling.
 
-| react-native-pre-text | react-native-nitro-modules | tested against |
+| @nexigen/react-native-pre-text | react-native-nitro-modules | tested against |
 |---|---|---|
 | 0.1.x | 0.35.0 and up | Nitro 0.36.1, React Native 0.86 |
 

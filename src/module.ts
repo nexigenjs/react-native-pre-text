@@ -3,6 +3,6 @@ import type { PreText } from './PreText.nitro';
 
 export function getModule(): PreText {
   throw new Error(
-    "'react-native-pre-text' is only supported on iOS and Android.",
+    "'@nexigen/react-native-pre-text' is only supported on iOS and Android.",
   );
 }

@@ -6,7 +6,12 @@ import {
   View,
   type LayoutChangeEvent,
 } from 'react-native';
-import { measure, measureBatch, measureWidth } from 'react-native-pre-text';
+import {
+  clearCache,
+  measure,
+  measureBatch,
+  measureWidth,
+} from '@nexigen/react-native-pre-text';
 
 import { SAMPLES } from './corpus';
 import {
@@ -28,15 +33,21 @@ const TEXTS = SAMPLES.map(sample => sample.text);
  * absurdities like 0.0002 ms. Timing a whole pass over all cases puts each
  * sample into the milliseconds where the clock is trustworthy, and the median
  * of several passes drops the one that collided with a GC.
- *
- * There is no measurement cache in the native layer, so every pass does the
- * full amount of work rather than replaying the first one.
  */
 const PASSES = 10;
 
-function benchmark(run: () => void): number {
+/**
+ * Median wall time of `PASSES` runs of `run`.
+ *
+ * `before` runs outside the timed window, which is what makes a cold number
+ * possible: the native layer caches measurements, so without clearing between
+ * passes everything after the first would be a cache hit and the median would
+ * report lookup time dressed up as measurement time.
+ */
+function benchmark(run: () => void, before?: () => void): number {
   const samples: number[] = [];
   for (let pass = 0; pass < PASSES; pass++) {
+    before?.();
     const started = now();
     run();
     samples.push(now() - started);
@@ -182,23 +193,34 @@ export function Summary({ width }: { width: number }) {
       }
     }
 
-    // One pass = every case measured once. `measureBatch` is what a real list
-    // would call — one crossing for all of them instead of one each — so both
-    // are timed to show what the crossing actually costs.
-    const perPassMs = benchmark(() => {
+    // One pass = every case measured once. Cold clears the cache first so the
+    // pass does the full amount of work; cached leaves it warm, which is what a
+    // list re-rendering or scrolling back actually hits. The gap between the two
+    // is what the cache buys.
+    const measureAll = () => {
       for (const sample of SAMPLES) {
         measure(sample.text, FONT, width);
       }
-    });
+    };
+    const coldPassMs = benchmark(measureAll, clearCache);
+    const cachedPassMs = benchmark(measureAll);
+    // `measureBatch` is what a real list would call — one crossing for all of
+    // them instead of one each — so the crossing cost is visible on its own.
     const batchPassMs = benchmark(() => {
       measureBatch(TEXTS, FONT, width);
-    });
+    }, clearCache);
+
+    // Left warm rather than cleared: the visible list is about to measure these
+    // same strings again, and a cleared cache would make the app look slower
+    // than it is for no reason other than that this panel ran.
+    measureAll();
 
     return {
       misses,
       worst,
       timing: {
-        perPassMs,
+        coldPassMs,
+        cachedPassMs,
         batchPassMs,
         // Wall time from handing the renderer 56 probes to its last answer.
         // Not a like-for-like rival to the numbers above and is not presented
@@ -286,12 +308,17 @@ export function Summary({ width }: { width: number }) {
             timing · {CASES} cases · median of {PASSES} passes
           </Text>
           <Text style={styles.line}>
-            measure() ×{CASES}{'  '}
-            {formatMs(report.timing.perPassMs)} ·{' '}
-            {formatMs(report.timing.perPassMs / CASES)}/case
+            measure() ×{CASES}, cold{'  '}
+            {formatMs(report.timing.coldPassMs)} ·{' '}
+            {formatMs(report.timing.coldPassMs / CASES)}/case
           </Text>
           <Text style={styles.line}>
-            measureBatch(){'  '}
+            measure() ×{CASES}, cached{'  '}
+            {formatMs(report.timing.cachedPassMs)} ·{' '}
+            {formatMs(report.timing.cachedPassMs / CASES)}/case
+          </Text>
+          <Text style={styles.line}>
+            measureBatch(), cold{'  '}
             {formatMs(report.timing.batchPassMs)} ·{' '}
             {formatMs(report.timing.batchPassMs / CASES)}/case
           </Text>
@@ -300,11 +327,13 @@ export function Summary({ width }: { width: number }) {
             {formatMs(report.timing.layoutMs)}
           </Text>
           <Text style={styles.note}>
-            The first two time a whole pass over every case, then divide — a
+            The first three time a whole pass over every case, then divide — a
             single sub-millisecond call is the same order as the clock's own
-            resolution, so timing one would report the clock. onLayout is wall
-            time instead: mounting views, laying out the shadow tree, returning
-            to JS. It is the wait this library removes, not a rival to it.
+            resolution, so timing one would report the clock. Cold clears the
+            measurement cache before each pass; cached is what a re-render or a
+            scroll back hits. onLayout is wall time instead: mounting views,
+            laying out the shadow tree, returning to JS. It is the wait this
+            library removes, not a rival to it.
           </Text>
         </View>
       )}

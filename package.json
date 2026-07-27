@@ -1,5 +1,5 @@
 {
-  "name": "react-native-pre-text",
+  "name": "@nexigen/react-native-pre-text",
   "version": "0.1.0",
   "description": "Know what a React Native <Text> will render as, before it renders. Native measurement on iOS TextKit and Android StaticLayout, over Nitro Modules.",
   "license": "MIT",
@@ -41,7 +41,9 @@
   "scripts": {
     "codegen": "nitrogen",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint src"
+    "lint": "eslint src",
+    "check:tarball": "node scripts/check-tarball.mjs",
+    "prepare": "nitrogen"
   },
   "peerDependencies": {
     "react": "*",

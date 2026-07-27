@@ -1,0 +1,123 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Called by release.yml so a publish runs the same gates, not a copy of them.
+  workflow_call:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    name: package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # `prepare` runs nitrogen here, which is what puts nitrogen/generated on
+      # disk — it is gitignored, so nothing before this step has it.
+      - run: npm ci
+
+      - run: npm run typecheck
+      - run: npm run lint
+
+      - name: Pack
+        run: npm pack
+
+      - name: Check tarball
+        run: npm run check:tarball
+
+      # Downloadable from the run, so a tarball can be installed into a real app
+      # before it is ever published.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-tarball
+          path: '*.tgz'
+          if-no-files-found: error
+
+  android:
+    name: android
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - run: npm ci
+      # The library is built through the example's Gradle project, so it needs
+      # the example's node_modules for the React Native and Nitro Gradle plugins.
+      - run: npm ci
+        working-directory: example
+
+      # Pinned by example/android/build.gradle. This is the slow step — roughly
+      # a gigabyte — and it is unavoidable while the library has a CMake target.
+      - name: Install NDK
+        run: $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install "ndk;27.1.12297006"
+
+      # The project name is autolinking's, not ours: React Native flattens the
+      # scoped package name into `nexigen_react-native-pre-text`. Renaming the
+      # package renames this target, so `./gradlew projects` is the source of
+      # truth if it ever stops resolving.
+      #
+      # assembleDebug rather than compileDebugKotlin: it drives CMake too, so
+      # the JNI glue is compiled rather than merely present.
+      - name: Build library
+        run: ./gradlew :nexigen_react-native-pre-text:assembleDebug --console=plain
+        working-directory: example/android
+
+  ios:
+    name: ios
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          working-directory: example
+          bundler-cache: true
+
+      - run: npm ci
+      - run: npm ci
+        working-directory: example
+
+      - name: pod install
+        run: bundle exec pod install
+        working-directory: example/ios
+
+      # The pod target alone, not the whole app: it compiles ios/PreText.swift
+      # against the generated glue, which is what could break here.
+      - name: Build pod
+        run: |
+          xcodebuild \
+            -workspace NitroPort.xcworkspace \
+            -scheme PreText \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath build \
+            build
+        working-directory: example/ios

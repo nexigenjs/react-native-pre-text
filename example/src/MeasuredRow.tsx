@@ -34,7 +34,7 @@ import {
   View,
   type LayoutChangeEvent,
 } from 'react-native';
-import { measure, measureWidth } from 'react-native-pre-text';
+import { measure, measureWidth } from '@nexigen/react-native-pre-text';
 
 import type { Sample } from './corpus';
 import {

@@ -12,7 +12,7 @@
  */
 
 import { useRef } from 'react';
-import type { MeasurableStyle } from 'react-native-pre-text';
+import type { MeasurableStyle } from '@nexigen/react-native-pre-text';
 
 export const FONT: MeasurableStyle = {
   fontFamily: 'System',

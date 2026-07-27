@@ -1,5 +1,5 @@
 /**
- * Validation harness for `react-native-pre-text`: every corpus case rendered
+ * Validation harness for `@nexigen/react-native-pre-text`: every corpus case rendered
  * as a real `<Text>`, with what `measure()` predicted next to what `onLayout`
  * reported.
  *

@@ -1,0 +1,84 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  # Lets a failed publish be retried without moving the tag.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to publish, e.g. v0.1.0'
+        required: true
+
+jobs:
+  # The same gates as an ordinary push, reused rather than restated — a release
+  # that skipped a check nobody noticed skipping is the failure mode here.
+  verify:
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      # `write`, not `read`: a tag push does not create a GitHub Release, so the
+      # last step creates one, and creating it is a write. With `read` everything
+      # succeeds up to and including the publish, then the release step fails —
+      # the worst possible place to find out, since the npm version is by then
+      # taken and cannot be republished.
+      contents: write
+      # Required for npm provenance: npm exchanges this for a signed attestation
+      # binding the tarball's digest to this workflow and commit.
+      id-token: write
+    environment: npm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://registry.npmjs.org
+
+      - run: npm ci
+
+      # A tag that disagrees with package.json publishes a version nobody asked
+      # for, under a tag that points somewhere else. Cheap to check, miserable
+      # to unpick afterwards, and npm versions cannot be replaced once taken.
+      - name: Check tag matches package.json
+        run: |
+          tag="${{ inputs.tag || github.ref_name }}"
+          tag_version="${tag#v}"
+          pkg_version="$(node -p 'require("./package.json").version')"
+          if [ "$tag_version" != "$pkg_version" ]; then
+            echo "tag $tag implies version $tag_version, package.json says $pkg_version" >&2
+            exit 1
+          fi
+          echo "publishing $pkg_version"
+
+      # Refuse to overwrite: npm rejects a duplicate version anyway, but failing
+      # here says why instead of leaving it to a registry error.
+      - name: Check version is unpublished
+        run: |
+          pkg="$(node -p 'const p=require("./package.json"); p.name + "@" + p.version')"
+          if npm view "$pkg" version >/dev/null 2>&1; then
+            echo "$pkg is already published" >&2
+            exit 1
+          fi
+
+      - name: Pack and check
+        run: |
+          npm pack
+          npm run check:tarball
+
+      - name: Publish
+        run: npm publish *.tgz --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Attach tarball to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: '*.tgz'
+          tag_name: ${{ inputs.tag || github.ref_name }}
