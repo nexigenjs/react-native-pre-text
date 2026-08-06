@@ -1,6 +1,6 @@
 {
   "name": "@nexigen/react-native-pre-text",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Accurate synchronous React Native text measurement before layout. Precompute text width, height and line count with native TextKit and StaticLayout over Nitro Modules.",
   "license": "MIT",
   "repository": {

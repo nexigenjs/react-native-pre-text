@@ -65,7 +65,6 @@ class PreText: HybridPreTextSpec {
       container.lineFragmentPadding = 0
       manager.usesFontLeading = false
       manager.addTextContainer(container)
-      storage.addLayoutManager(manager)
     }
   }
 
@@ -199,8 +198,9 @@ class PreText: HybridPreTextSpec {
     options: MeasureOptions
   ) -> TextMeasurement {
     let maxLines = Int(options.maxLines ?? 0)
-    let container = engine.container
-    let manager = engine.manager
+    let layout = engine
+    let container = layout.container
+    let manager = layout.manager
 
     // `lineFragmentPadding` and `usesFontLeading` are set once, in the engine's
     // initialiser — only what varies per call is assigned here.
@@ -208,11 +208,18 @@ class PreText: HybridPreTextSpec {
       width: options.maxWidth,
       height: .greatestFiniteMagnitude
     )
-    container.lineBreakMode = maxLines > 0 ? .byTruncatingTail : .byWordWrapping
+    container.lineBreakMode = maxLines > 0 ? .byTruncatingTail : .byClipping
     container.maximumNumberOfLines = maxLines
-    engine.storage.setAttributedString(
+    // RN constructs and post-processes its text storage before attaching the
+    // layout manager. Detach while replacing the attributed string to preserve
+    // that order; attaching first changes fallback-font metrics (notably Thai).
+    if layout.storage.layoutManagers.contains(manager) {
+      layout.storage.removeLayoutManager(manager)
+    }
+    layout.storage.setAttributedString(
       NSAttributedString(string: text, attributes: attributes)
     )
+    layout.storage.addLayoutManager(manager)
 
     manager.ensureLayout(for: container)
 
@@ -282,6 +289,10 @@ class PreText: HybridPreTextSpec {
       let scaled = CGFloat(lineHeight) * scale(spec)
       paragraph.minimumLineHeight = scaled
       paragraph.maximumLineHeight = scaled
+
+      if scaled >= font.lineHeight {
+        attributes[.baselineOffset] = (scaled - font.lineHeight) / 2
+      }
     }
     switch spec.writingDirection {
     case "ltr": paragraph.baseWritingDirection = .leftToRight

@@ -13,11 +13,10 @@ import {
   measureBatch,
   measureWidth,
 } from '@nexigen/react-native-pre-text';
+import type { MeasurableStyle } from '@nexigen/react-native-pre-text';
 
 import { SAMPLES } from './corpus';
-import { FONT, TOLERANCE, formatMs, now, useRestartingClock } from './metrics';
-
-const TEXTS = SAMPLES.map(sample => sample.text);
+import { TOLERANCE, formatMs, now, useRestartingClock } from './metrics';
 
 /**
  * How many times to repeat each timed workload.
@@ -69,14 +68,20 @@ type Miss = {
   deltaIntrinsic: number | null;
 };
 
-export function Summary({ width }: { width: number }) {
+export function Summary({
+  width,
+  font,
+}: {
+  width: number;
+  font: MeasurableStyle;
+}) {
   const [layouts, setLayouts] = useState<Record<string, RenderedLayout>>({});
 
   /**
    * When the renderer was handed this batch, and when it last answered. Refs,
    * not state: the timestamp must not itself schedule the re-render it times.
    */
-  const startedWaitingAt = useRestartingClock(width);
+  const startedWaitingAt = useRestartingClock(`${width}|${font.fontFamily}`);
   const lastLayoutAt = useRef(0);
 
   const onProbeLayout = useCallback(
@@ -132,16 +137,16 @@ export function Summary({ width }: { width: number }) {
   }, [layouts, intrinsics, width]);
 
   /**
-   * `FONT`'s vertical metrics, and the one claim about them worth failing on.
+   * The selected font's vertical metrics, and the one claim about them worth
+   * failing on.
    *
    * Independent of the probes above and of `width` — nothing here wraps, so
-   * this needs no `onLayout` to arrive and renders on the first pass. `FONT` is
-   * a module constant, hence the empty dependency list.
+   * this needs no `onLayout` to arrive and renders on the first pass.
    */
   const fontMetrics = useMemo(() => {
-    const metrics = getFontMetrics(FONT);
+    const metrics = getFontMetrics(font);
     const inked = metrics.ascender + metrics.descender;
-    const box = FONT.lineHeight;
+    const box = font.lineHeight;
     return {
       ...metrics,
       inked,
@@ -159,7 +164,7 @@ export function Summary({ width }: { width: number }) {
         metrics.xHeight < metrics.capHeight &&
         metrics.capHeight <= metrics.ascender,
     };
-  }, []);
+  }, [font]);
 
   const report = useMemo(() => {
     if (measuredCases < CASES) {
@@ -170,7 +175,7 @@ export function Summary({ width }: { width: number }) {
     let worst = 0;
     for (const sample of SAMPLES) {
       const rendered = layouts[sample.id]!;
-      const predicted = measure(sample.text, FONT, width);
+      const predicted = measure(sample.text, font, width);
       const deltaHeight = rendered.height - predicted.height;
 
       // Keep this in sync with MeasuredRow: wrapped text reports the
@@ -185,7 +190,7 @@ export function Summary({ width }: { width: number }) {
       const deltaIntrinsic =
         renderedIntrinsic === undefined
           ? null
-          : renderedIntrinsic - measureWidth(sample.text, FONT);
+          : renderedIntrinsic - measureWidth(sample.text, font);
 
       const matches =
         Number.isFinite(deltaHeight) &&
@@ -222,7 +227,7 @@ export function Summary({ width }: { width: number }) {
     // is what the cache buys.
     const measureAll = () => {
       for (const sample of SAMPLES) {
-        measure(sample.text, FONT, width);
+        measure(sample.text, font, width);
       }
     };
     const coldPassMs = benchmark(measureAll, clearCache);
@@ -230,7 +235,11 @@ export function Summary({ width }: { width: number }) {
     // `measureBatch` is what a real list would call — one crossing for all of
     // them instead of one each — so the crossing cost is visible on its own.
     const batchPassMs = benchmark(() => {
-      measureBatch(TEXTS, FONT, width);
+      measureBatch(
+        SAMPLES.map(sample => sample.text),
+        font,
+        width,
+      );
     }, clearCache);
 
     // Left warm rather than cleared: the visible list is about to measure these
@@ -252,7 +261,7 @@ export function Summary({ width }: { width: number }) {
         layoutMs: Math.max(0, lastLayoutAt.current - startedWaitingAt),
       },
     };
-  }, [layouts, intrinsics, measuredCases, width, startedWaitingAt]);
+  }, [layouts, intrinsics, measuredCases, width, font, startedWaitingAt]);
 
   return (
     <View>
@@ -261,7 +270,7 @@ export function Summary({ width }: { width: number }) {
         {SAMPLES.map(sample => (
           <Text
             key={sample.id}
-            style={[FONT, styles.probe, { maxWidth: width }]}
+            style={[font, styles.probe, { maxWidth: width }]}
             allowFontScaling={false}
             onLayout={(event: LayoutChangeEvent) => {
               const { width: renderedWidth, height: renderedHeight } =
@@ -284,7 +293,7 @@ export function Summary({ width }: { width: number }) {
             showsHorizontalScrollIndicator={false}
           >
             <Text
-              style={FONT}
+              style={font}
               allowFontScaling={false}
               onLayout={(event: LayoutChangeEvent) => {
                 onIntrinsicLayout(sample.id, event.nativeEvent.layout.width);
@@ -332,7 +341,7 @@ export function Summary({ width }: { width: number }) {
 
       <View style={[styles.box, styles.stackedBox]}>
         <Text style={styles.title}>
-          font metrics · {FONT.fontFamily} {FONT.fontSize}
+          font metrics · {font.fontFamily} {font.fontSize}
         </Text>
         <Text style={styles.line}>
           ascender {fontMetrics.ascender.toFixed(2)} · descender{' '}
@@ -345,11 +354,13 @@ export function Summary({ width }: { width: number }) {
           {fontMetrics.lineHeight.toFixed(2)}
         </Text>
         <Text style={fontMetrics.fits ? styles.ok : styles.bad}>
-          {FONT.lineHeight === undefined
-            ? `ascender + descender ${fontMetrics.inked.toFixed(2)} · no lineHeight to pin the box`
+          {font.lineHeight === undefined
+            ? `ascender + descender ${fontMetrics.inked.toFixed(
+                2,
+              )} · no lineHeight to pin the box`
             : `ascender + descender ${fontMetrics.inked.toFixed(2)} ${
                 fontMetrics.fits ? 'fits' : 'overflows'
-              } lineHeight ${FONT.lineHeight.toFixed(2)}${
+              } lineHeight ${font.lineHeight.toFixed(2)}${
                 fontMetrics.fits ? '' : ' · glyphs clip'
               }`}
         </Text>

@@ -43,19 +43,19 @@ raw fractional value therefore lands short of `onLayout` by up to one pixel —
 ceils rather than rounds. Both platforms apply that same step, which is why
 `pixelRatio` is required on iOS too and not only on Android.
 
-Verified against a 56-case corpus of real content — doubled spaces, tabs,
+Verified against a 65-case corpus of real content — doubled spaces, tabs,
 newlines, curly quotes, em dashes, non-breaking spaces from a paste, ™ and ©,
-prices, ★ ratings, @handles, URLs, US addresses, emoji (ZWJ families, skin
-tones, flags), CJK, Thai, Arabic, Hebrew, Devanagari, Vietnamese:
+prices, ★ ratings, @handles, URLs, US addresses, CJK, Thai, Arabic, Hebrew,
+Devanagari and Vietnamese. Emoji coverage includes separate isolation cases
+for text and colour presentation selectors, keycaps, ZWJ families and
+professions, skin-tone modifiers, regional flags and tag-sequence flags, plus
+mixed and dense emoji runs.
 
-| platform | device | width | cases matching `onLayout` |
-|---|---|---|---|
-| iOS | iPhone 17 Pro | 326 pt | **56 / 56** |
-| Android | Galaxy M34, density 2.8125 | 308 dp | **56 / 56** |
-
-Those runs predate the pixel-grid rounding above, when iOS's worst gap was
-0.265 pt — inside the 0.5 pt tolerance, so every case still counted as a match.
-Re-run `example/` for the current figure.
+The current iOS run on an iPhone 17 Pro at 326 pt matches `onLayout` in all
+**65 / 65** cases with a 0.000 pt worst gap using the system font. The earlier
+56-case corpus also matched **56 / 56** on a Galaxy M34 at 308 dp. Run
+`example/` on either platform to validate the current corpus, width and font on
+the device you support.
 
 Each case is checked three ways: height against `onLayout`, width against
 `onLayout` where the text fits on one line, and width against an unwrapped
@@ -71,6 +71,21 @@ No style changes that, so the example renders each sample a second time inside a
 horizontal `ScrollView`, which grants an unbounded width. Nothing wraps there,
 and `onLayout` gives up the real longest line to compare `measureWidth()`
 against.
+
+### Cross-platform font validation
+
+The example keeps a horizontal font selector above the validation list. A
+selection is applied to both the rendered `<Text>` and every pre-measurement,
+then the entire corpus is recalculated. That makes fallback, wrapping and font
+metric differences visible without editing the source between runs.
+
+It includes the platform system font and four bundled families from different
+groups: Inter (sans), Lora (serif), Fira Code (monospace) and Noto Sans
+(multilingual sans). The four custom fonts are SIL Open Font License 1.1 assets
+used only by the example; they are not included in the published library.
+Their upstream links and individual license files live in
+[`example/assets/fonts`](example/assets/fonts/README.md). The same files are
+registered through `UIAppFonts` on iOS and `assets/fonts` on Android.
 
 ## Install
 
@@ -233,10 +248,6 @@ you would rather fail at install time than at build time.
 
 ## Known limits
 
-- **Thai and other scripts with a script-specific minimum line height.** iOS
-  will not compress a Thai line below roughly 24.5 pt even when `lineHeight` is
-  24. Measured correctly here because the platform reports it, but worth
-  knowing if you also compute layout yourself.
 - **Nested `<Text>` with mixed styles** — a bold run or a link inside a message
   — is not supported. The model is one style per measured string.
 - **`numberOfLines` / `didTruncate`** is implemented but not yet covered by the

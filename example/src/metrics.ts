@@ -15,7 +15,6 @@ import { useRef } from 'react';
 import type { MeasurableStyle } from '@nexigen/react-native-pre-text';
 
 export const FONT: MeasurableStyle = {
-  fontFamily: 'System',
   fontSize: 16,
   lineHeight: 24,
 };
@@ -78,6 +77,6 @@ export function formatMs(value: number): string {
   return value >= 100
     ? `${value.toFixed(0)} ms`
     : value >= 1
-      ? `${value.toFixed(2)} ms`
-      : `${value.toFixed(3)} ms`;
+    ? `${value.toFixed(2)} ms`
+    : `${value.toFixed(3)} ms`;
 }

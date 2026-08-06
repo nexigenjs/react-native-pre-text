@@ -42,7 +42,7 @@ export const SAMPLES: Sample[] = [
     text:
       "Just got out of the gym and honestly that was the hardest session I've " +
       'done all month. Coach kept adding rounds every time someone complained, ' +
-      "so nobody said a word for the last twenty minutes. Worth it though.",
+      'so nobody said a word for the last twenty minutes. Worth it though.',
   },
   {
     id: 'double-space-sentences',
@@ -211,6 +211,51 @@ export const SAMPLES: Sample[] = [
     id: 'emoji-only',
     kind: 'emoji-only',
     text: '🎉🎉🎉',
+  },
+  {
+    id: 'emoji-single',
+    kind: 'emoji-single',
+    text: '😀',
+  },
+  {
+    id: 'emoji-text-presentation',
+    kind: 'emoji-text-presentation',
+    text: '💪',
+  },
+  {
+    id: 'emoji-color-presentation',
+    kind: 'emoji-color-presentation',
+    text: '♥️',
+  },
+  {
+    id: 'emoji-keycap',
+    kind: 'emoji-keycap',
+    text: '1️⃣',
+  },
+  {
+    id: 'emoji-zwj-family-only',
+    kind: 'emoji-zwj-family-only',
+    text: '👨‍👩‍👧‍👦',
+  },
+  {
+    id: 'emoji-zwj-profession-only',
+    kind: 'emoji-zwj-profession-only',
+    text: '🧑‍🚒',
+  },
+  {
+    id: 'emoji-skin-tone-only',
+    kind: 'emoji-skin-tone-only',
+    text: '👋🏿',
+  },
+  {
+    id: 'emoji-regional-flag-only',
+    kind: 'emoji-regional-flag-only',
+    text: '🇺🇦',
+  },
+  {
+    id: 'emoji-tag-flag-only',
+    kind: 'emoji-tag-flag-only',
+    text: '🏴󠁧󠁢󠁳󠁣󠁴󠁿',
   },
   {
     id: 'emoji-zwj',

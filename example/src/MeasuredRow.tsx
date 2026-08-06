@@ -35,12 +35,12 @@ import {
   type LayoutChangeEvent,
 } from 'react-native';
 import { measure, measureWidth } from '@nexigen/react-native-pre-text';
+import type { MeasurableStyle } from '@nexigen/react-native-pre-text';
 
 import type { Sample } from './corpus';
 import {
   CARD_MARGIN_H,
   CARD_PADDING_H,
-  FONT,
   TOLERANCE,
   formatMs,
   now,
@@ -54,21 +54,26 @@ type Props = {
   index: number;
   /** Screen width minus list padding and card margin/padding. */
   availableWidth: number;
+  /** The globally selected family, shared by rendering and pre-measurement. */
+  font: MeasurableStyle;
 };
 
-function MeasuredRowImpl({ sample, index, availableWidth }: Props) {
+function MeasuredRowImpl({ sample, index, availableWidth, font }: Props) {
   const { predicted, predictedMs } = useMemo(() => {
     const started = now();
-    const result = measure(sample.text, FONT, availableWidth);
+    const result = measure(sample.text, font, availableWidth);
     return { predicted: result, predictedMs: now() - started };
-  }, [sample.text, availableWidth]);
+  }, [sample.text, font, availableWidth]);
 
   /** Natural width on one unwrapped line — what the ScrollView probe renders. */
   const { predictedIntrinsic, predictedIntrinsicMs } = useMemo(() => {
     const started = now();
-    const result = measureWidth(sample.text, FONT);
-    return { predictedIntrinsic: result, predictedIntrinsicMs: now() - started };
-  }, [sample.text]);
+    const result = measureWidth(sample.text, font);
+    return {
+      predictedIntrinsic: result,
+      predictedIntrinsicMs: now() - started,
+    };
+  }, [sample.text, font]);
 
   /**
    * When this row last began waiting on the renderer. Restarts with the inputs,
@@ -76,7 +81,7 @@ function MeasuredRowImpl({ sample, index, availableWidth }: Props) {
    * turn the new latency into nonsense.
    */
   const startedWaitingAt = useRestartingClock(
-    `${sample.text}|${availableWidth}`,
+    `${sample.text}|${availableWidth}|${font.fontFamily}`,
   );
 
   const [measured, setMeasured] = useState<Measured | null>(null);
@@ -129,9 +134,10 @@ function MeasuredRowImpl({ sample, index, availableWidth }: Props) {
       </Text>
 
       <Text
-        style={[FONT, styles.sample, { maxWidth: availableWidth }]}
+        style={[font, styles.sample, { maxWidth: availableWidth }]}
         allowFontScaling={false}
-        onLayout={onTextLayout}>
+        onLayout={onTextLayout}
+      >
         {sample.text}
       </Text>
 
@@ -145,11 +151,13 @@ function MeasuredRowImpl({ sample, index, availableWidth }: Props) {
         scrollEnabled={false}
         showsHorizontalScrollIndicator={false}
         style={styles.intrinsicProbe}
-        pointerEvents="none">
+        pointerEvents="none"
+      >
         <Text
-          style={FONT}
+          style={font}
           allowFontScaling={false}
-          onLayout={onIntrinsicLayout}>
+          onLayout={onIntrinsicLayout}
+        >
           {sample.text}
         </Text>
       </ScrollView>
@@ -171,7 +179,9 @@ function MeasuredRowImpl({ sample, index, availableWidth }: Props) {
         </Text>
         <Text style={styles.bannerValue}>
           {measured
-            ? `${measured.width.toFixed(2)} × ${measured.height.toFixed(2)} pt (${formatMs(measured.elapsedMs)})`
+            ? `${measured.width.toFixed(2)} × ${measured.height.toFixed(
+                2,
+              )} pt (${formatMs(measured.elapsedMs)})`
             : 'measuring…'}
         </Text>
       </View>
@@ -181,12 +191,14 @@ function MeasuredRowImpl({ sample, index, availableWidth }: Props) {
           style={[
             styles.banner,
             matches ? styles.bannerMatch : styles.bannerNoMatch,
-          ]}>
+          ]}
+        >
           <Text
             style={[
               styles.bannerLabel,
               matches ? styles.bannerLabelMatch : styles.bannerLabelNoMatch,
-            ]}>
+            ]}
+          >
             {matches ? 'MATCHES onLayout' : 'MISMATCH'}
           </Text>
           <Text style={styles.bannerValue}>

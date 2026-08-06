@@ -6,9 +6,10 @@
  * @format
  */
 
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import {
   FlatList,
+  Pressable,
   StatusBar,
   StyleSheet,
   Text,
@@ -20,6 +21,7 @@ import {
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 
 import { SAMPLES, type Sample } from './src/corpus';
+import { FONT_OPTIONS, type FontOption } from './src/fonts';
 import { MeasuredRow } from './src/MeasuredRow';
 import { Summary } from './src/Summary';
 import {
@@ -29,6 +31,7 @@ import {
   LIST_PADDING_H,
   textWidthFor,
 } from './src/metrics';
+import type { MeasurableStyle } from '@nexigen/react-native-pre-text';
 
 function App() {
   const isDarkMode = useColorScheme() === 'dark';
@@ -44,6 +47,11 @@ function App() {
 function AppContent() {
   const { width: screenWidth } = useWindowDimensions();
   const availableWidth = textWidthFor(screenWidth);
+  const [selectedFont, setSelectedFont] = useState(FONT_OPTIONS[0]!);
+  const font = useMemo<MeasurableStyle>(
+    () => ({ ...FONT, fontFamily: selectedFont.fontFamily }),
+    [selectedFont.fontFamily],
+  );
 
   const renderItem = useMemo(
     () =>
@@ -53,15 +61,22 @@ function AppContent() {
             sample={item}
             index={index}
             availableWidth={availableWidth}
+            font={font}
           />
         );
       },
-    [availableWidth],
+    [availableWidth, font],
   );
 
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'left', 'right']}>
+      <FontSelector
+        selectedFont={selectedFont}
+        onSelectFont={setSelectedFont}
+      />
       <FlatList
+        key={selectedFont.id}
+        style={styles.list}
         data={SAMPLES}
         renderItem={renderItem}
         keyExtractor={keyExtractor}
@@ -70,7 +85,12 @@ function AppContent() {
         maxToRenderPerBatch={6}
         windowSize={7}
         ListHeaderComponent={
-          <Header screenWidth={screenWidth} availableWidth={availableWidth} />
+          <Header
+            screenWidth={screenWidth}
+            availableWidth={availableWidth}
+            selectedFont={selectedFont}
+            font={font}
+          />
         }
       />
     </SafeAreaView>
@@ -84,18 +104,25 @@ function keyExtractor(item: Sample) {
 type HeaderProps = {
   screenWidth: number;
   availableWidth: number;
+  selectedFont: FontOption;
+  font: MeasurableStyle;
 };
 
-function Header({ screenWidth, availableWidth }: HeaderProps) {
+function Header({
+  screenWidth,
+  availableWidth,
+  selectedFont,
+  font,
+}: HeaderProps) {
   return (
     <View style={styles.header}>
       <Text style={styles.title}>pre-text</Text>
       <Text style={styles.subtitle}>
-        {SAMPLES.length} cases · {FONT.fontFamily} {FONT.fontSize}/
+        {SAMPLES.length} cases · {selectedFont.label} {FONT.fontSize}/
         {FONT.lineHeight}
       </Text>
 
-      <Summary width={availableWidth} />
+      <Summary key={selectedFont.id} width={availableWidth} font={font} />
 
       <View style={styles.mathBox}>
         <Text style={styles.mathLine}>
@@ -110,6 +137,49 @@ function Header({ screenWidth, availableWidth }: HeaderProps) {
   );
 }
 
+function FontSelector({
+  selectedFont,
+  onSelectFont,
+}: {
+  selectedFont: FontOption;
+  onSelectFont: (font: FontOption) => void;
+}) {
+  return (
+    <View style={styles.selector}>
+      <Text style={styles.selectorLabel}>SWIPE TO CHANGE FONT</Text>
+      <FlatList
+        horizontal
+        data={FONT_OPTIONS}
+        keyExtractor={item => item.id}
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={styles.fontList}
+        renderItem={({ item }) => {
+          const selected = item.id === selectedFont.id;
+          return (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityState={{ selected }}
+              onPress={() => onSelectFont(item)}
+              style={[styles.fontChip, selected && styles.fontChipSelected]}
+            >
+              <Text
+                style={[
+                  styles.fontChipName,
+                  { fontFamily: item.fontFamily },
+                  selected && styles.fontChipNameSelected,
+                ]}
+              >
+                {item.label}
+              </Text>
+              <Text style={styles.fontChipGroup}>{item.group}</Text>
+            </Pressable>
+          );
+        }}
+      />
+    </View>
+  );
+}
+
 const styles = StyleSheet.create({
   safe: {
     flex: 1,
@@ -119,10 +189,20 @@ const styles = StyleSheet.create({
     paddingHorizontal: LIST_PADDING_H,
     paddingBottom: 32,
   },
+  list: {
+    flex: 1,
+  },
   header: {
     paddingTop: 12,
     paddingBottom: 16,
     gap: 8,
+  },
+  selector: {
+    paddingHorizontal: LIST_PADDING_H,
+    paddingTop: 10,
+    paddingBottom: 8,
+    gap: 6,
+    backgroundColor: '#0b0d10',
   },
   title: {
     color: '#f5f7fa',
@@ -133,6 +213,42 @@ const styles = StyleSheet.create({
     color: '#7d8794',
     fontSize: 13,
     marginBottom: 4,
+  },
+  selectorLabel: {
+    color: '#687485',
+    fontSize: 10,
+    fontWeight: '700',
+    letterSpacing: 1.1,
+  },
+  fontList: {
+    gap: 8,
+    paddingVertical: 2,
+    paddingRight: 16,
+  },
+  fontChip: {
+    minWidth: 116,
+    borderWidth: 1,
+    borderColor: '#2a3038',
+    borderRadius: 12,
+    backgroundColor: '#15181d',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    gap: 3,
+  },
+  fontChipSelected: {
+    borderColor: '#4d9fff',
+    backgroundColor: '#16304d',
+  },
+  fontChipName: {
+    color: '#cbd3dc',
+    fontSize: 16,
+  },
+  fontChipNameSelected: {
+    color: '#ffffff',
+  },
+  fontChipGroup: {
+    color: '#778291',
+    fontSize: 9,
   },
   mathBox: {
     borderRadius: 10,
