@@ -9,8 +9,8 @@ export type FontOption = {
 
 /**
  * One platform default plus four bundled OFL-licensed families from distinct
- * type groups. The bundled filenames match the family requested on Android;
- * iOS resolves the same family names from UIAppFonts.
+ * type groups. On Android the family requested must be the asset's file name;
+ * iOS resolves the font's own family name from UIAppFonts.
  */
 export const FONT_OPTIONS: readonly FontOption[] = [
   {
@@ -39,12 +39,14 @@ export const FONT_OPTIONS: readonly FontOption[] = [
     id: 'fira-code',
     label: 'Fira Code',
     group: 'monospace',
-    fontFamily: 'Fira Code',
+    // Android finds an asset font by file name, and the file is FiraCode.ttf.
+    // Asking for 'Fira Code' there silently falls back to the system font.
+    fontFamily: Platform.select({ android: 'FiraCode', default: 'Fira Code' }),
   },
   {
     id: 'noto-sans',
     label: 'Noto Sans',
     group: 'multilingual sans',
-    fontFamily: 'Noto Sans',
+    fontFamily: Platform.select({ android: 'NotoSans', default: 'Noto Sans' }),
   },
 ];

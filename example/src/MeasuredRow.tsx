@@ -135,7 +135,6 @@ function MeasuredRowImpl({ sample, index, availableWidth, font }: Props) {
 
       <Text
         style={[font, styles.sample, { maxWidth: availableWidth }]}
-        allowFontScaling={false}
         onLayout={onTextLayout}
       >
         {sample.text}
@@ -155,7 +154,6 @@ function MeasuredRowImpl({ sample, index, availableWidth, font }: Props) {
       >
         <Text
           style={font}
-          allowFontScaling={false}
           onLayout={onIntrinsicLayout}
         >
           {sample.text}

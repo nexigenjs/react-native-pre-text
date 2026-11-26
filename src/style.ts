@@ -1,4 +1,4 @@
-import type { TextStyle } from 'react-native';
+import { PixelRatio, Platform, type TextStyle } from 'react-native';
 
 import type { TextSpec } from './PreText.nitro';
 
@@ -26,12 +26,29 @@ export type MeasurableStyle = Pick<
   android_hyphenationFrequency?: 'none' | 'normal' | 'full';
 };
 
+/** The `<Text>` props that decide how the system text size applies. */
+export type FontScaling = {
+  /** Mirrors `<Text allowFontScaling>`; defaults to true, as on `<Text>`. */
+  allowFontScaling?: boolean;
+  /**
+   * Mirrors `<Text maxFontSizeMultiplier>`: 1 or more caps the system text
+   * scale, anything else leaves it uncapped.
+   */
+  maxFontSizeMultiplier?: number;
+  /**
+   * Replaces the system text scale with a fixed linear multiplier, for tests
+   * and reproducible snapshots. Leave it out in an app: Android 14 and later
+   * scale text nonlinearly, which no single multiplier reproduces.
+   */
+  fontScale?: number;
+};
+
 /** RN's own default when a `<Text>` has no `fontSize`. */
 const DEFAULT_FONT_SIZE = 14;
 
 export function toSpec(
   style: MeasurableStyle,
-  fontScale: number | undefined,
+  scaling: FontScaling = {},
 ): TextSpec {
   return {
     fontFamily: style.fontFamily,
@@ -42,7 +59,9 @@ export function toSpec(
     letterSpacing: style.letterSpacing,
     textTransform: style.textTransform,
     fontVariant: style.fontVariant as string[] | undefined,
-    fontScale: fontScale ?? 1,
+    allowFontScaling: scaling.allowFontScaling ?? true,
+    maxFontSizeMultiplier: scaling.maxFontSizeMultiplier,
+    fontScale: scaling.fontScale ?? systemFontScale(),
     writingDirection: style.writingDirection,
     includeFontPadding: style.includeFontPadding,
     textBreakStrategy: style.textBreakStrategy,
@@ -50,25 +69,18 @@ export function toSpec(
   };
 }
 
-/** Stable identity for memo keys and height caches. */
-export function styleKey(
-  style: MeasurableStyle,
-  fontScale: number | undefined,
-): string {
-  const spec = toSpec(style, fontScale);
-  return [
-    spec.fontFamily ?? '',
-    spec.fontSize,
-    spec.fontWeight ?? '',
-    spec.fontStyle ?? '',
-    spec.lineHeight ?? '',
-    spec.letterSpacing ?? '',
-    spec.textTransform ?? '',
-    (spec.fontVariant ?? []).join('+'),
-    spec.fontScale ?? 1,
-    spec.writingDirection ?? '',
-    spec.includeFontPadding ?? '',
-    spec.textBreakStrategy ?? '',
-    spec.hyphenationFrequency ?? '',
-  ].join('|');
+/**
+ * The scale `<Text>` will apply, for the platforms where that is one number.
+ *
+ * iOS: read per call, like `pixelRatio`, because the user can change text size
+ * while the app runs. `Math.fround` because Fabric reads the same table through
+ * `floatValue`; passing the double through would differ in the eighth digit.
+ *
+ * Android: undefined on purpose, so native scales through RN's own SP
+ * conversion, which is nonlinear from Android 14.
+ */
+function systemFontScale(): number | undefined {
+  return Platform.OS === 'ios'
+    ? Math.fround(PixelRatio.getFontScale())
+    : undefined;
 }

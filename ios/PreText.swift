@@ -120,7 +120,10 @@ class PreText: HybridPreTextSpec {
       xHeight: Double(font.xHeight),
       capHeight: Double(font.capHeight),
       lineGap: Double(font.leading),
-      lineHeight: spec.lineHeight ?? Double(font.lineHeight)
+      // Scaled like the font it sits next to, or the two disagree as soon as
+      // the system text size moves off 1.
+      lineHeight: spec.lineHeight.map { $0 * Double(scale(spec)) }
+        ?? Double(font.lineHeight)
     )
   }
 
@@ -319,9 +322,20 @@ class PreText: HybridPreTextSpec {
 
   // MARK: - Font resolution
 
+  /// RN's `RCTEffectiveFontSizeMultiplierFromTextAttributes`: 1 with scaling
+  /// off, otherwise the system multiplier, capped only by a
+  /// `maxFontSizeMultiplier` of 1 or more. It applies to the font size and the
+  /// line height; `letterSpacing` stays unscaled, as RN leaves `NSKern` alone.
   private func scale(_ spec: TextSpec) -> CGFloat {
+    guard spec.allowFontScaling ?? true else { return 1 }
     let value = spec.fontScale ?? 1
-    return value > 0 ? CGFloat(value) : 1
+    let multiplier = value > 0 ? CGFloat(value) : 1
+    if let cap = spec.maxFontSizeMultiplier, cap >= 1 {
+      // `fminf`, as RN calls it: both sides narrowed to Float first, so a cap
+      // of 1.2 becomes 1.2000000477 there and must here too.
+      return CGFloat(Swift.min(Float(cap), Float(multiplier)))
+    }
+    return multiplier
   }
 
   private func cacheKey(_ spec: TextSpec) -> String {
