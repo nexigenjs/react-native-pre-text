@@ -1,6 +1,6 @@
 {
   "name": "@nexigen/react-native-pre-text",
-  "version": "0.2.0",
+  "version": "1.0.0",
   "description": "Measure React Native text height, width and line count before render. Stops FlatList feeds and chats from jumping on fast scroll, makes scrollToIndex land, and enables Read more without a second render. Native TextKit and StaticLayout over Nitro Modules.",
   "license": "MIT",
   "repository": {
@@ -120,7 +120,7 @@
     "typescript": "^5.8.3"
   },
   "engines": {
-    "node": ">= 22.11.0"
+    "node": ">=20.19.4"
   },
   "create-react-native-library": {
     "type": "nitro-module",

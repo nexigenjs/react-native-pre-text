@@ -1,3 +1,4 @@
+import CoreText
 import Foundation
 import UIKit
 
@@ -116,13 +117,18 @@ class PreText: HybridPreTextSpec {
     let font = resolveFont(spec)
     return FontMetrics(
       ascender: Double(font.ascender),
-      descender: Double(font.descender),
+      // UIKit reports the descender as a negative offset from the baseline;
+      // Android's `descent` is a positive distance. Both platforms answer as a
+      // distance, so `ascender + descender` is the font's height on either.
+      descender: -Double(font.descender),
       xHeight: Double(font.xHeight),
       capHeight: Double(font.capHeight),
       lineGap: Double(font.leading),
       // Scaled like the font it sits next to, or the two disagree as soon as
       // the system text size moves off 1.
-      lineHeight: spec.lineHeight.map { $0 * Double(scale(spec)) }
+      // A lineHeight of 0 or less is no lineHeight, to measure() and to RN.
+      lineHeight: spec.lineHeight
+        .flatMap { $0 > 0 && $0.isFinite ? $0 * Double(scale(spec)) : nil }
         ?? Double(font.lineHeight)
     )
   }
@@ -200,7 +206,19 @@ class PreText: HybridPreTextSpec {
     attributes: [NSAttributedString.Key: Any],
     options: MeasureOptions
   ) -> TextMeasurement {
-    let maxLines = Int(options.maxLines ?? 0)
+    // `Int(_:)` traps on NaN, infinity and anything past Int's range, and a
+    // trap here takes the whole app down. JS already sends a whole number or
+    // 0; this is the backstop.
+    let requested = options.maxLines ?? 0
+    let maxLines = requested.isFinite && requested >= 1
+      ? Int(min(requested, Double(Int32.max)))
+      : 0
+    // RN measures an empty string as the placeholder "I" in the same
+    // attributes and then zeroes the width (`ensurePlaceholderIfEmpty` in
+    // TextLayoutManager.mm): one line of the style's height. An empty storage
+    // would instead lay out an extra line fragment in TextKit's default font.
+    let isEmpty = text.isEmpty
+    let laidOut = isEmpty ? "I" : text
     let layout = engine
     let container = layout.container
     let manager = layout.manager
@@ -220,7 +238,7 @@ class PreText: HybridPreTextSpec {
       layout.storage.removeLayoutManager(manager)
     }
     layout.storage.setAttributedString(
-      NSAttributedString(string: text, attributes: attributes)
+      NSAttributedString(string: laidOut, attributes: attributes)
     )
     layout.storage.addLayoutManager(manager)
 
@@ -229,6 +247,8 @@ class PreText: HybridPreTextSpec {
     var lineCount = 0
     var widest: CGFloat = 0
     var lastLineWidth: CGFloat = 0
+    var lastLineStart = 0
+    var limitedHeight: CGFloat = 0
     let glyphRange = manager.glyphRange(for: container)
 
     if glyphRange.length > 0 {
@@ -242,22 +262,44 @@ class PreText: HybridPreTextSpec {
         lineCount += 1
         widest = max(widest, rect.width)
         lastLineWidth = rect.width
+        lastLineStart = index
+        if lineCount <= maxLines {
+          limitedHeight = rect.maxY
+        }
         index = NSMaxRange(lineRange)
         if lineRange.length == 0 { break }
       }
     }
 
-    let used = manager.usedRect(for: container)
+    var height = manager.usedRect(for: container).height
+    // RCTTextLayoutManager.mm does not trust `usedRect` once a line limit is
+    // set: with N lines and an empty line N+1 (text ending in "\n") TextKit
+    // reports N+1. RN sums the kept lines instead, adding the extra line
+    // fragment only when fewer than N lines exist.
+    if maxLines > 0 {
+      if lineCount < maxLines {
+        limitedHeight += manager.extraLineFragmentUsedRect.height
+      }
+      height = limitedHeight
+    }
+    // With `byTruncatingTail` TextKit still places every glyph in the
+    // container, so the glyph range alone never shows the cut. The truncated
+    // range of the last kept line does.
     let didTruncate =
-      maxLines > 0 && glyphRange.length < manager.numberOfGlyphs
+      maxLines > 0 && lineCount > 0 && (
+        manager.truncatedGlyphRange(inLineFragmentForGlyphAt: lastLineStart)
+          .location != NSNotFound
+          || glyphRange.length < manager.numberOfGlyphs
+      )
 
     let scale = CGFloat(options.pixelRatio ?? 0)
+    let epsilon = options.roundingEpsilon ?? 0
 
     return TextMeasurement(
-      width: Double(pixelCeil(widest, scale)),
-      height: Double(pixelCeil(used.height, scale)),
+      width: isEmpty ? 0 : Double(pixelCeil(widest, scale, epsilon)),
+      height: Double(pixelCeil(height, scale, epsilon)),
       lineCount: Double(lineCount),
-      lastLineWidth: Double(pixelCeil(lastLineWidth, scale)),
+      lastLineWidth: isEmpty ? 0 : Double(pixelCeil(lastLineWidth, scale, epsilon)),
       didTruncate: didTruncate
     )
   }
@@ -276,9 +318,16 @@ class PreText: HybridPreTextSpec {
   /// never over, because the platform ceils rather than rounds. Applying the
   /// same step is what makes `measure()` equal `onLayout` instead of merely
   /// approaching it.
-  private func pixelCeil(_ value: CGFloat, _ scale: CGFloat) -> CGFloat {
+  ///
+  /// RN 0.88 nudges first (`internal_roundTextMeasurementToPixelGrid`, in
+  /// Float): `ceil((size + 0.001) * scale) / scale`, so a height that lands
+  /// exactly on the grid, as any integer lineHeight does, goes up a pixel.
+  /// The JS layer passes that epsilon only to the RN versions that apply it.
+  private func pixelCeil(_ value: CGFloat, _ scale: CGFloat, _ epsilon: Double) -> CGFloat {
     guard scale > 0, value.isFinite, value > 0 else { return value }
-    return ceil(value * scale) / scale
+    guard epsilon > 0 else { return ceil(value * scale) / scale }
+    let factor = Float(scale)
+    return CGFloat(ceil((Float(value) + Float(epsilon)) * factor) / factor)
   }
 
   // MARK: - Attributes
@@ -288,7 +337,7 @@ class PreText: HybridPreTextSpec {
     var attributes: [NSAttributedString.Key: Any] = [.font: font]
 
     let paragraph = NSMutableParagraphStyle()
-    if let lineHeight = spec.lineHeight, lineHeight > 0 {
+    if let lineHeight = spec.lineHeight, lineHeight > 0, lineHeight.isFinite {
       let scaled = CGFloat(lineHeight) * scale(spec)
       paragraph.minimumLineHeight = scaled
       paragraph.maximumLineHeight = scaled
@@ -304,7 +353,10 @@ class PreText: HybridPreTextSpec {
     }
     attributes[.paragraphStyle] = paragraph
 
-    if let letterSpacing = spec.letterSpacing, letterSpacing != 0 {
+    // RN sets NSKern for any letterSpacing the style gives, 0 included, and a
+    // kern of 0 switches the font's pair kerning off. Skipping it for 0 leaves
+    // kerning on and measures narrower than the screen draws.
+    if let letterSpacing = spec.letterSpacing, letterSpacing.isFinite {
       attributes[.kern] = CGFloat(letterSpacing)
     }
 
@@ -315,9 +367,21 @@ class PreText: HybridPreTextSpec {
     switch spec.textTransform {
     case "uppercase": return text.uppercased()
     case "lowercase": return text.lowercased()
-    case "capitalize": return text.capitalized
+    case "capitalize": return capitalize(text)
     default: return text
     }
+  }
+
+  /// RN's `capitalizeText`: split on spaces only, capitalise each token, but
+  /// lowercase one that starts with a digit ("3D-printed" → "3d-printed").
+  private func capitalize(_ text: String) -> String {
+    let numbers = NumberFormatter()
+    return text.components(separatedBy: " ").map { word in
+      if let first = word.first, numbers.number(from: String(first)) == nil {
+        return word.capitalized
+      }
+      return word.lowercased()
+    }.joined(separator: " ")
   }
 
   // MARK: - Font resolution
@@ -350,6 +414,14 @@ class PreText: HybridPreTextSpec {
     ].joined(separator: "_")
   }
 
+  /// A port of RN's `RCTFontWithFontProperties` (RCTFontUtils.mm).
+  ///
+  /// The family goes through `UIFont.fontNames(forFamilyName:)` and the face
+  /// is the one whose weight, read from its name, is closest to the one asked
+  /// for. That lookup is also what expo-font hooks to serve its aliases, so a
+  /// family such as `Inter_600SemiBold` resolves here as it does on screen.
+  /// No weight or italic is synthesised for a named family: RN draws the
+  /// nearest real face.
   private func resolveFont(_ spec: TextSpec) -> UIFont {
     let key = cacheKey(spec)
     if let cached = fontCache[key] {
@@ -359,75 +431,132 @@ class PreText: HybridPreTextSpec {
     let size = CGFloat(spec.fontSize) * scale(spec)
     let weight = mapWeight(spec.fontWeight)
     let italic = spec.fontStyle == "italic"
+    let family = spec.fontFamily ?? ""
 
-    var font: UIFont
-    if let family = spec.fontFamily,
-       family != "System",
-       family != "system",
-       let named = UIFont(name: family, size: size) {
-      font = named
+    var font: UIFont?
+    if let design = Self.systemDesigns[family.lowercased()] {
+      let base = systemFont(size: size, weight: weight, italic: italic, condensed: false)
+      font = base.fontDescriptor.withDesign(design)
+        .map { UIFont(descriptor: $0, size: size) } ?? base
+    } else if family.isEmpty || family == Self.systemFamily {
+      font = systemFont(size: size, weight: weight, italic: italic, condensed: false)
     } else {
-      font = UIFont.systemFont(ofSize: size, weight: weight)
+      var names = UIFont.fontNames(forFamilyName: family)
+      var target = weight
+      if names.isEmpty {
+        // A face name rather than a family ("Helvetica-Light"): its family's
+        // faces are the candidates. RN then writes `(weight != 0) ?: …`, which
+        // keeps a regular request at the named face's own weight and turns any
+        // other into 1.0, the heaviest face. Repeated as written.
+        if let named = UIFont(name: family, size: size) {
+          names = UIFont.fontNames(forFamilyName: named.familyName)
+          target = weight != .regular ? UIFont.Weight(rawValue: 1.0) : rnWeight(of: named)
+          font = named
+        } else {
+          font = systemFont(
+            size: size,
+            weight: weight,
+            italic: italic,
+            condensed: family == "SystemCondensed"
+          )
+        }
+      }
+      if !names.isEmpty {
+        var closest = CGFloat.infinity
+        for name in names {
+          guard let match = UIFont(name: name, size: size),
+                match.fontDescriptor.symbolicTraits.contains(.traitItalic) == italic
+          else { continue }
+          let candidate = rnWeight(of: match).rawValue
+          if abs(candidate - target.rawValue) < abs(closest - target.rawValue) {
+            font = match
+            closest = candidate
+          }
+        }
+        if font == nil {
+          // Single-face families such as Zapfino: the first face, whatever it is.
+          font = UIFont(name: names[0], size: size)
+        }
+      }
     }
 
-    var traits: UIFontDescriptor.SymbolicTraits = []
-    if italic { traits.insert(.traitItalic) }
-    // A named family carries its own weight — only synthesise what it lacks.
-    if weight >= .semibold, spec.fontFamily != nil,
-       !font.fontDescriptor.symbolicTraits.contains(.traitBold) {
-      traits.insert(.traitBold)
-    }
-    if !traits.isEmpty,
-       let descriptor = font.fontDescriptor.withSymbolicTraits(
-        font.fontDescriptor.symbolicTraits.union(traits)
-       ) {
-      font = UIFont(descriptor: descriptor, size: size)
-    }
-
+    var resolved = font ?? systemFont(size: size, weight: weight, italic: italic, condensed: false)
     if let variants = spec.fontVariant, !variants.isEmpty {
-      font = applyVariants(variants, to: font, size: size)
+      resolved = applyVariants(variants, to: resolved, size: size)
     }
 
-    fontCache[key] = font
-    return font
+    fontCache[key] = resolved
+    return resolved
   }
 
+  /// RN's `RCTDefaultFontWithFontProperties`: the system font at the weight,
+  /// with italic and condensed added as traits.
+  private func systemFont(
+    size: CGFloat,
+    weight: UIFont.Weight,
+    italic: Bool,
+    condensed: Bool
+  ) -> UIFont {
+    let font = UIFont.systemFont(ofSize: size, weight: weight)
+    guard italic || condensed else { return font }
+    var traits = font.fontDescriptor.symbolicTraits
+    if italic { traits.insert(.traitItalic) }
+    if condensed { traits.insert(.traitCondensed) }
+    guard let descriptor = font.fontDescriptor.withSymbolicTraits(traits) else { return font }
+    return UIFont(descriptor: descriptor, size: size)
+  }
+
+  /// The family name RN treats as "the system font".
+  private static let systemFamily = UIFont.systemFont(ofSize: 14).familyName
+
+  /// RN's `RCTGetFontDescriptorSystemDesign`: CSS generic families.
+  private static let systemDesigns: [String: UIFontDescriptor.SystemDesign] = [
+    "system-ui": .default,
+    "ui-sans-serif": .default,
+    "ui-serif": .serif,
+    "ui-rounded": .rounded,
+    "ui-monospace": .monospaced,
+  ]
+
+  /// RN's `RCTGetFontWeight`: the weight a face's name ends in, checked in this
+  /// order, else the font's own weight trait.
+  private func rnWeight(of font: UIFont) -> UIFont.Weight {
+    let name = font.fontName.lowercased()
+    for (suffix, weight) in Self.weightSuffixes where name.hasSuffix(suffix) {
+      return weight
+    }
+    let traits = CTFontCopyTraits(font as CTFont) as NSDictionary
+    let value = (traits[kCTFontWeightTrait as String] as? NSNumber)?.doubleValue ?? 0
+    return UIFont.Weight(rawValue: CGFloat(value))
+  }
+
+  private static let weightSuffixes: [(String, UIFont.Weight)] = [
+    ("normal", .regular),
+    ("ultralight", .ultraLight),
+    ("thin", .thin),
+    ("light", .light),
+    ("regular", .regular),
+    ("medium", .medium),
+    ("semibold", .semibold),
+    ("demibold", .semibold),
+    ("extrabold", .heavy),
+    ("ultrabold", .heavy),
+    ("bold", .bold),
+    ("heavy", .heavy),
+    ("black", .black),
+  ]
+
+  /// RN's `RCTFontFeatures`: a fixed order, whatever order the style lists.
   private func applyVariants(
     _ variants: [String],
     to font: UIFont,
     size: CGFloat
   ) -> UIFont {
-    var settings: [[UIFontDescriptor.FeatureKey: Int]] = []
-    for variant in variants {
-      switch variant {
-      case "small-caps":
-        settings.append([
-          .type: kLowerCaseType,
-          .selector: kLowerCaseSmallCapsSelector,
-        ])
-      case "tabular-nums":
-        settings.append([
-          .type: kNumberSpacingType,
-          .selector: kMonospacedNumbersSelector,
-        ])
-      case "proportional-nums":
-        settings.append([
-          .type: kNumberSpacingType,
-          .selector: kProportionalNumbersSelector,
-        ])
-      case "oldstyle-nums":
-        settings.append([
-          .type: kNumberCaseType,
-          .selector: kLowerCaseNumbersSelector,
-        ])
-      case "lining-nums":
-        settings.append([
-          .type: kNumberCaseType,
-          .selector: kUpperCaseNumbersSelector,
-        ])
-      default:
-        continue
-      }
+    let requested = Set(variants)
+    let settings = Self.featureOrder.compactMap { entry in
+      requested.contains(entry.0)
+        ? [UIFontDescriptor.FeatureKey.type: entry.1, .selector: entry.2]
+        : nil
     }
     guard !settings.isEmpty else { return font }
     let descriptor = font.fontDescriptor.addingAttributes([
@@ -436,18 +565,47 @@ class PreText: HybridPreTextSpec {
     return UIFont(descriptor: descriptor, size: size)
   }
 
+  private static let featureOrder: [(String, Int, Int)] = [
+    ("small-caps", kLowerCaseType, kLowerCaseSmallCapsSelector),
+    ("oldstyle-nums", kNumberCaseType, kLowerCaseNumbersSelector),
+    ("lining-nums", kNumberCaseType, kUpperCaseNumbersSelector),
+    ("tabular-nums", kNumberSpacingType, kMonospacedNumbersSelector),
+    ("proportional-nums", kNumberSpacingType, kProportionalNumbersSelector),
+    ("stylistic-one", kStylisticAlternativesType, kStylisticAltOneOnSelector),
+    ("stylistic-two", kStylisticAlternativesType, kStylisticAltTwoOnSelector),
+    ("stylistic-three", kStylisticAlternativesType, kStylisticAltThreeOnSelector),
+    ("stylistic-four", kStylisticAlternativesType, kStylisticAltFourOnSelector),
+    ("stylistic-five", kStylisticAlternativesType, kStylisticAltFiveOnSelector),
+    ("stylistic-six", kStylisticAlternativesType, kStylisticAltSixOnSelector),
+    ("stylistic-seven", kStylisticAlternativesType, kStylisticAltSevenOnSelector),
+    ("stylistic-eight", kStylisticAlternativesType, kStylisticAltEightOnSelector),
+    ("stylistic-nine", kStylisticAlternativesType, kStylisticAltNineOnSelector),
+    ("stylistic-ten", kStylisticAlternativesType, kStylisticAltTenOnSelector),
+    ("stylistic-eleven", kStylisticAlternativesType, kStylisticAltElevenOnSelector),
+    ("stylistic-twelve", kStylisticAlternativesType, kStylisticAltTwelveOnSelector),
+    ("stylistic-thirteen", kStylisticAlternativesType, kStylisticAltThirteenOnSelector),
+    ("stylistic-fourteen", kStylisticAlternativesType, kStylisticAltFourteenOnSelector),
+    ("stylistic-fifteen", kStylisticAlternativesType, kStylisticAltFifteenOnSelector),
+    ("stylistic-sixteen", kStylisticAlternativesType, kStylisticAltSixteenOnSelector),
+    ("stylistic-seventeen", kStylisticAlternativesType, kStylisticAltSeventeenOnSelector),
+    ("stylistic-eighteen", kStylisticAlternativesType, kStylisticAltEighteenOnSelector),
+    ("stylistic-nineteen", kStylisticAlternativesType, kStylisticAltNineteenOnSelector),
+    ("stylistic-twenty", kStylisticAlternativesType, kStylisticAltTwentyOnSelector),
+  ]
+
+  /// RN's `RCTUIFontWeightFromInteger`: round to the nearest hundred, so 550
+  /// or a numeric 600 land where RN puts them.
   private func mapWeight(_ weight: String?) -> UIFont.Weight {
+    let value: Int
     switch weight {
-    case "100": return .ultraLight
-    case "200": return .thin
-    case "300": return .light
-    case "400", "normal", .none: return .regular
-    case "500": return .medium
-    case "600": return .semibold
-    case "700", "bold": return .bold
-    case "800": return .heavy
-    case "900": return .black
-    default: return .regular
+    case .none, "normal": value = 400
+    case "bold": value = 700
+    default: value = Int(weight ?? "") ?? 400
     }
+    let weights: [UIFont.Weight] = [
+      .ultraLight, .thin, .light, .regular, .medium, .semibold, .bold, .heavy, .black,
+    ]
+    let index = Swift.min(Swift.max((value + 50) / 100 - 1, 0), weights.count - 1)
+    return weights[index]
   }
 }

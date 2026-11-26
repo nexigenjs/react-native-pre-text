@@ -84,6 +84,11 @@ anything renders, from the same engine that will draw the text:
 ```tsx
 import { measureHeights } from '@nexigen/react-native-pre-text';
 
+// measureHeights reads the system text size itself. Listing it in the deps
+// recomputes the layout when the user changes it (exhaustive-deps will call it
+// unnecessary, because the closure never reads it).
+const { fontScale } = useWindowDimensions();
+
 const layout = useMemo(() => {
   let offset = 0;
   return measureHeights(messages.map((m) => m.text), STYLE, width).map(
@@ -94,7 +99,7 @@ const layout = useMemo(() => {
       return row;
     },
   );
-}, [messages, width]);
+}, [messages, width, fontScale]);
 
 <FlatList
   inverted
@@ -170,8 +175,9 @@ it, `ceil(size * pointScaleFactor) / pointScaleFactor` in
 comment "Rounding to *next* value on the pixel grid". Handing back TextKit's
 raw fractional value therefore lands short of `onLayout` by up to one pixel —
 0.333 pt at 3x, 0.5 pt at 2x, always short and never over, because the platform
-ceils rather than rounds. Both platforms apply that same step, which is why
-`pixelRatio` is required on iOS too and not only on Android.
+ceils rather than rounds. Both platforms apply that same step: iOS from the
+`pixelRatio` passed in, Android by laying out in whole physical pixels at RN's
+own screen density.
 
 Verified against a 65-case corpus of real content — doubled spaces, tabs,
 newlines, curly quotes, em dashes, non-breaking spaces from a paste, ™ and ©,
@@ -181,30 +187,48 @@ for text and colour presentation selectors, keycaps, ZWJ families and
 professions, skin-tone modifiers, regional flags and tag-sequence flags, plus
 mixed and dense emoji runs.
 
-`example/` runs that corpus by itself at launch, in every bundled font under
-three scaling modes (the system text size, `allowFontScaling={false}`, and
-`maxFontSizeMultiplier`), followed by the [use cases](#use-cases): the chat
-list with `getItemLayout` and `scrollToIndex`, and a bubble shrunk to the
-measured width. It needs no taps, so it can be relaunched at each system text
-size, and it writes one `PRETEXT {json}` line per check to the device log.
+`example/` runs its checks by itself at launch, with no taps, so it can be
+relaunched at each system text size; each check writes one `PRETEXT {json}`
+line to the device log and its verdict to the screen. They are:
 
-Current results, RN 0.86, 65 cases × 5 fonts × 3 modes at each text size:
+- **The corpus** in every bundled font under three scaling modes: the system
+  text size, `allowFontScaling={false}`, and `maxFontSizeMultiplier`.
+- **More styles** in every font, at the system text size: no `lineHeight` at
+  all, `letterSpacing: 0`, real tracking, and weights 500, 600 and 900. On iOS
+  also Avenir Next and Helvetica Neue at 400, 500, 600 and 800, where choosing
+  the face is the question, and `ui-monospace`, `ui-rounded` and `ui-serif`.
+- **`maxLines` 1 and 3** against `numberOfLines` in every font: the clamped
+  height and the lines left showing. `didTruncate` is checked against whether
+  the unclamped measurement has more lines than the limit.
+- **Edge cases** the corpus has none of, in the default font with and without
+  a `lineHeight` and with `small-caps`: an empty string, only whitespace, text
+  ending in a newline, a word wider than the box, and short single lines of
+  Chinese, Japanese, Thai and Devanagari, each with no limit, 1 and 2 lines;
+  and `maxLines` values that are not a limit (`Infinity`, `NaN`, negative,
+  below 1), which must not change the result.
+- **The [use cases](#use-cases):** the chat list with `getItemLayout` and
+  `scrollToIndex`, and a bubble shrunk to the measured width.
 
-| Device | Width | Text sizes | Size vs `onLayout` | Worst gap |
-|---|---|---|---|---|
-| iPhone 17 Pro simulator, iOS 26.2 | 326 pt | 1.0, 1.235, 2.143 | all match | 1 px (0.333 pt) |
-| Pixel 7 emulator, Android 16 | 335 dp | 1.0, 1.3, 2.0 | all match | 1 px (0.381 dp) |
+A check fails on a gap of half a point or more, so "match" below means within
+one physical pixel at these densities.
 
-The use cases pass at every size, with one expected exception: at Android's
-2.0 scale, one Korean sample shrunk to its measured width breaks into fewer
-lines (see [Known limits](#known-limits)). The same checks also pass in stock
-Expo dev builds, Android on SDK 58 (RN 0.88, Nitro 0.37) and iOS on SDK 57
-(RN 0.86), with the package installed from its npm tarball.
+Current results, RN 0.86, on this version of the code:
 
-Line counts come from `onTextLayout`, and they agree everywhere but once: on
-iOS at 1.235, `onTextLayout` reports 2 lines for one Fira Code sample whose
-`onLayout` box is 3 lines tall, the same as `measure()` says. That disagreement
-is inside RN.
+| Device | Width | Text sizes | Checks |
+|---|---|---|---|
+| iPhone 17 Pro simulator, iOS 26.2 | 326 pt | 1.0, 1.235, 2.143 | 69 of 69 at every size |
+| Pixel 7 emulator, Android 16 | 335 dp | 1.0, 1.3, 2.0 | 58 of 58; 57 at 2.0 |
+
+The one failure is the expected one: at Android's 2.0 scale, one Korean
+sample shrunk to its measured width breaks into fewer lines (see
+[Known limits](#known-limits)). On RN 0.88, Android also passes with the
+"Bold text" accessibility setting on, which 0.88 applies to every `<Text>`.
+iOS on RN 0.88 has not been run on a device: its new pixel rounding is
+implemented from RN's source, not yet verified against it.
+
+Line counts come from `onTextLayout`. In some runs on iOS at 1.235 it reports
+2 lines for one Fira Code sample whose `onLayout` box is 3 lines tall, the
+same as `measure()` says; that disagreement is inside RN.
 
 Run `example/` on the device you support to validate the corpus, width and
 fonts there.
@@ -250,8 +274,8 @@ npm install @nexigen/react-native-pre-text react-native-nitro-modules
 cd ios && pod install
 ```
 
-New Architecture only. See [Nitro versions](#nitro-versions) for the version
-pairing.
+React Native 0.85 or later, New Architecture only. See
+[Nitro versions](#nitro-versions) for the version pairing.
 
 ### Expo
 
@@ -264,9 +288,12 @@ npx expo prebuild
 npx expo run:ios   # or: npx expo run:android
 ```
 
-Verified with the example's checks in stock projects: SDK 58 on Android and
-SDK 57 on iOS. SDK 58's own `expo-modules-jsi` does not compile on iOS with
-Xcode 26.2, before this package is reached.
+The example's checks have passed in stock Expo projects during development:
+SDK 58 on Android and SDK 57 on iOS. SDK 58's own `expo-modules-jsi` does not
+compile on iOS with Xcode 26.2, before this package is reached. On iOS a font
+family is looked up the way `<Text>` looks it up, through
+`UIFont.fontNames(forFamilyName:)`, which is where expo-font serves its aliases
+(`Inter_600SemiBold`) from.
 
 ## API
 
@@ -293,10 +320,13 @@ type TextMeasurement = {
   didTruncate: boolean;  // maxLines cut the text short
 };
 
+// The <Text> props that change the layout, each with <Text>'s default.
 type MeasureConfig = {
-  maxLines?: number;              // mirrors numberOfLines
-  allowFontScaling?: boolean;     // mirrors <Text>, default true
-  maxFontSizeMultiplier?: number; // mirrors <Text>
+  maxLines?: number;              // numberOfLines
+  allowFontScaling?: boolean;     // default true
+  maxFontSizeMultiplier?: number;
+  textBreakStrategy?: 'simple' | 'highQuality' | 'balanced'; // Android
+  android_hyphenationFrequency?: 'none' | 'normal' | 'full';
   fontScale?: number;             // fixed override for tests; omit in apps
 };
 ```
@@ -308,10 +338,13 @@ type MeasureConfig = {
 Anything that can move a line break or change a line's height:
 `fontFamily`, `fontSize`, `fontWeight`, `fontStyle`, `lineHeight`,
 `letterSpacing`, `textTransform`, `fontVariant`, `writingDirection`, and on
-Android `includeFontPadding`, `textBreakStrategy`,
-`android_hyphenationFrequency`.
+Android `includeFontPadding`. The `<Text>` props that do the same go in the
+config instead: `numberOfLines` as `maxLines`, the scaling props, and on
+Android `textBreakStrategy` and `android_hyphenationFrequency`.
 
-Colour, alignment and decoration cannot change the measurement and are ignored.
+Colour and decoration cannot change the measurement and are ignored. So is
+alignment, with one exception: see `textAlign: 'justify'` under
+[Known limits](#known-limits).
 
 ### System text size
 
@@ -345,6 +378,33 @@ are stale numbers held by your components. Recompute them when
 
 `fontScale` replaces the system scale with a fixed linear multiplier, for tests
 and snapshots. Leave it out in an app.
+
+### Upgrading to 1.0
+
+0.1 measured at a text scale of 1 unless told otherwise; `<Text>` does not.
+What changes:
+
+- **React Native 0.85 or later** is supported and tested. Older apps stay on
+  0.1.
+- **`{ fontScale: PixelRatio.getFontScale() }`**, which the 0.1 README
+  suggested. Remove it. It now forces the fixed linear override, which on
+  Android 14 and later does not match how the system scales text.
+- **No config for a `<Text>` with `allowFontScaling={false}`.** That used to
+  measure unscaled by default. Pass `{ allowFontScaling: false }`, the same as
+  the `<Text>`.
+- **`getFontMetrics()` follows the system text size** too, unless the config
+  says `allowFontScaling: false`.
+- **`getFontMetrics().descender` is positive on iOS.** It was UIKit's negative
+  offset; it is now a distance below the baseline, as on Android, so
+  `ascender + descender` is the font's height on both platforms.
+- **`getFontMetrics().lineHeight` is the laid-out height of one line** of text
+  in the style, `lineHeight`, font padding and pixel rounding included, rather
+  than the font's nominal line height.
+- **`textBreakStrategy` and `android_hyphenationFrequency` moved to the
+  config.** They are `<Text>` props, not style, like the scaling props beside
+  them. Pass them as the last argument instead of in the style.
+- **`MeasureOptions` and `TextSpec` are no longer exported.** They were the
+  native boundary's own types and no public function took them.
 
 ## Performance
 
@@ -400,9 +460,9 @@ give up the guarantee this library exists for:
   widths does not approximate that, it disagrees with it.
 - Kerning and ligatures across a segment boundary vanish when widths are summed
   rather than measured together.
-- Script-specific minimum line heights, like the Thai case under
-  [Known limits](#known-limits), are the platform's decision and are simply
-  absent from the arithmetic.
+- Script-specific line heights, such as the taller lines Thai and other
+  scripts get from their fallback fonts, are the platform's decision and are
+  simply absent from the arithmetic.
 
 Caching whole measurements gets the repeat-call cost without touching any of
 that, because a memoised pure function returns what the function would have.
@@ -413,9 +473,10 @@ The package ships pre-generated Nitro glue in `nitrogen/`, and that glue is
 written against Nitro's internal API, not a stable contract. The floor is
 therefore a hard one; there is no ceiling.
 
-| @nexigen/react-native-pre-text | react-native-nitro-modules | tested against |
-|---|---|---|
-| 0.1.x | 0.35.0 and up | Nitro 0.36.1 and 0.37.2, React Native 0.86 and 0.88 |
+| @nexigen/react-native-pre-text | react-native | react-native-nitro-modules | tested against |
+|---|---|---|---|
+| 0.1.x | New Architecture | 0.35.0 and up | Nitro 0.36.1, React Native 0.86 |
+| 1.x | 0.85 and up | 0.35.0 and up | Nitro 0.36.1 and 0.37.2, React Native 0.86 and 0.88 |
 
 0.35.0 is an architectural boundary, not a policy choice. That release
 restructured the Android JNI layer: `JHybridObject` split into nested
@@ -443,8 +504,6 @@ you would rather fail at install time than at build time.
 
 - **Nested `<Text>` with mixed styles** — a bold run or a link inside a message
   — is not supported. The model is one style per measured string.
-- **`numberOfLines` / `didTruncate`** is implemented but not yet covered by the
-  corpus.
 - **`maxFontSizeMultiplier` before RN 0.87.** Up to 0.86, RN's own text
   measure cache (`areTextAttributesEquivalentLayoutWise` in
   `TextMeasureCache.h`) leaves `maxFontSizeMultiplier` out of its key. When the
@@ -453,6 +512,24 @@ you would rather fail at install time than at build time.
   `measure()` returns what the prop asks for, so in that case it disagrees with
   the screen. Fixed in RN 0.87 by facebook/react-native#56960.
 - **`dynamicTypeRamp`** (iOS) is not supported.
+- **An empty string** measures as `onLayout` reports it, which differs by
+  platform. iOS lays out a placeholder in the style, so one line of the
+  style's height, `lineHeight` included, with width 0; `lastLineWidth` is 0
+  while RN's `onTextLayout` describes the placeholder. Android lays out the
+  empty text with the font alone, so one line of the font's natural height,
+  `lineHeight` ignored.
+- **`textAlign: 'justify'` on Android** turns on inter-word justification,
+  which lets Android's line breaker squeeze spaces and can fit a paragraph in
+  fewer lines. The library measures ragged-right, so justified text can come
+  out taller than it renders.
+- **Android on an external display or under a density override** (RN 0.85 and
+  0.86): `onTextLayout` there converts line widths with the window's density,
+  `onLayout` and this library with the screen's, so `lastLineWidth` can differ
+  from `onTextLayout` by their ratio. RN 0.87 converts both with the screen's.
+- **iOS text scale at startup.** The scale is read from JS `Dimensions`. RN can
+  report 1.0 there for a moment at launch while the renderer already uses the
+  real scale (a known gap in `RCTDeviceInfo`); measurements taken in that window
+  come out unscaled until the next update.
 - **Shrinking a container to the measured `width`** and rendering the text
   again at that width keeps the same lines in the example's checks on iOS, but
   not always on Android. There `highQuality` breaking optimises the whole

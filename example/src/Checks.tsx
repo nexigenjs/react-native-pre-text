@@ -25,6 +25,7 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  useWindowDimensions,
   View,
   type LayoutChangeEvent,
   type StyleProp,
@@ -55,14 +56,91 @@ function log(payload: object) {
 
 const round = (value: number) => Math.round(value * 1000) / 1000;
 
+type StyleVariant = { id: string; label: string; style: MeasurableStyle };
+
 type Step =
-  | { kind: 'matrix'; font: FontOption; scaling: ScalingMode }
+  | {
+      kind: 'matrix';
+      font: FontOption;
+      scaling: ScalingMode;
+      variant?: StyleVariant;
+    }
+  | { kind: 'truncate'; font: FontOption; maxLines: number }
+  | { kind: 'edge' }
   | { kind: 'chat' }
   | { kind: 'bubble' };
+
+/** One line, like a preview or a name; three, like a collapsed "Read more". */
+const MAX_LINES = [1, 3];
+
+/**
+ * Styles beyond the corpus's 16/24. Without a lineHeight, Android takes
+ * BoringLayout's fast path and natural font metrics; a letterSpacing of 0
+ * switches kerning off on iOS; real tracking runs Android's em conversion.
+ */
+const STYLE_VARIANTS: StyleVariant[] = [
+  { id: 'natural', label: '16, no lineHeight', style: { fontSize: 16 } },
+  {
+    id: 'kern0',
+    label: '16/24 letterSpacing 0',
+    style: { fontSize: 16, lineHeight: 24, letterSpacing: 0 },
+  },
+  {
+    id: 'tracked',
+    label: '15 letterSpacing 0.6',
+    style: { fontSize: 15, letterSpacing: 0.6 },
+  },
+  ...(['500', '600', '900'] as const).map(fontWeight => ({
+    id: `w${fontWeight}`,
+    label: `16/24 weight ${fontWeight}`,
+    style: { fontSize: 16, lineHeight: 24, fontWeight },
+  })),
+];
+
+/**
+ * iOS families with real faces at several weights, where picking the face is
+ * the whole question, and the CSS generic families RN maps to system designs.
+ * Android has neither, so these run on iOS only.
+ */
+const IOS_FONT_STEPS: Step[] =
+  Platform.OS === 'ios'
+    ? [
+        ...['Avenir Next', 'Helvetica Neue'].flatMap(family =>
+          (['400', '500', '600', '800'] as const).map(fontWeight => ({
+            kind: 'matrix' as const,
+            font: { id: family, label: family, group: '', fontFamily: family },
+            scaling: SCALING_MODES[0]!,
+            variant: {
+              id: `w${fontWeight}`,
+              label: `weight ${fontWeight}`,
+              style: { fontSize: 16, lineHeight: 24, fontWeight },
+            },
+          })),
+        ),
+        ...['ui-monospace', 'ui-rounded', 'ui-serif'].map(family => ({
+          kind: 'matrix' as const,
+          font: { id: family, label: family, group: '', fontFamily: family },
+          scaling: SCALING_MODES[0]!,
+        })),
+      ]
+    : [];
 
 const STEPS: Step[] = [
   ...FONT_OPTIONS.flatMap(font =>
     SCALING_MODES.map(scaling => ({ kind: 'matrix' as const, font, scaling })),
+  ),
+  ...FONT_OPTIONS.flatMap(font =>
+    STYLE_VARIANTS.map(variant => ({
+      kind: 'matrix' as const,
+      font,
+      scaling: SCALING_MODES[0]!,
+      variant,
+    })),
+  ),
+  ...IOS_FONT_STEPS,
+  { kind: 'edge' },
+  ...FONT_OPTIONS.flatMap(font =>
+    MAX_LINES.map(maxLines => ({ kind: 'truncate' as const, font, maxLines })),
   ),
   { kind: 'chat' },
   { kind: 'bubble' },
@@ -98,7 +176,11 @@ export function ChecksRunner({
 
   const onDone = useCallback((verdict: Verdict) => {
     log({ event: 'check', ...verdict });
-    setVerdicts(previous => [...previous, verdict]);
+    // On the next tick, not inside the layout event that finished the step.
+    // RN 0.88 dispatches onLayout synchronously, so the next step would mount,
+    // lay out and finish inside the same update, and so on down the list,
+    // until React's nested-update limit (50) aborts the run.
+    setTimeout(() => setVerdicts(previous => [...previous, verdict]), 0);
   }, []);
 
   useEffect(() => {
@@ -113,10 +195,28 @@ export function ChecksRunner({
     <View style={[styles.offscreen, { width }]} pointerEvents="none">
       {step?.kind === 'matrix' ? (
         <ProbeSet
-          key={`${step.font.id}-${step.scaling.id}`}
+          key={`${step.font.id}-${step.scaling.id}-${step.variant?.id ?? ''}`}
+          font={{
+            ...(step.variant?.style ?? FONT),
+            fontFamily: step.font.fontFamily,
+          }}
+          fontLabel={
+            step.variant
+              ? `${step.font.label} · ${step.variant.label}`
+              : step.font.label
+          }
+          scaling={step.scaling}
+          width={width}
+          onDone={onDone}
+        />
+      ) : null}
+      {step?.kind === 'edge' ? <EdgeSet width={width} onDone={onDone} /> : null}
+      {step?.kind === 'truncate' ? (
+        <TruncateSet
+          key={`${step.font.id}-${step.maxLines}`}
           font={{ ...FONT, fontFamily: step.font.fontFamily }}
           fontLabel={step.font.label}
-          scaling={step.scaling}
+          maxLines={step.maxLines}
           width={width}
           onDone={onDone}
         />
@@ -304,6 +404,288 @@ function ProbeSet({
   );
 }
 
+// MARK: - Edge cases
+
+const EDGE_TEXTS = [
+  { id: 'empty', text: '' },
+  { id: 'space', text: ' ' },
+  { id: 'newline', text: '\n' },
+  { id: 'trailing-newline', text: 'Hello\n' },
+  { id: 'two-lines-trailing-newline', text: 'Hello\nWorld\n' },
+  { id: 'double-trailing-newline', text: 'Hello\n\n' },
+  {
+    id: 'long-word',
+    text: 'Pneumonoultramicroscopicsilicovolcanoconiosis'.repeat(3),
+  },
+  // Short single lines in scripts drawn from fallback fonts: without a
+  // lineHeight these take Android's BoringLayout path and its fallback spacing.
+  { id: 'cjk', text: '好的，明天见' },
+  { id: 'japanese', text: 'ありがとう' },
+  { id: 'thai', text: 'สวัสดีครับ' },
+  { id: 'devanagari', text: 'नमस्ते दोस्त' },
+];
+const EDGE_LIMITS = [0, 1, 2];
+/**
+ * No fontFamily on any of these: the default font, and on Android no font
+ * selector, which decides whether RN applies a fontVariant at all.
+ */
+const EDGE_STYLES: { id: string; style: MeasurableStyle }[] = [
+  { id: '16/24', style: { fontSize: 16, lineHeight: 24 } },
+  { id: '16', style: { fontSize: 16 } },
+  { id: 'small-caps', style: { fontSize: 16, fontVariant: ['small-caps'] } },
+];
+/** None of these is a limit, so each must match the unlimited measurement. */
+const NOT_A_LIMIT = [Infinity, NaN, -1, 0.5];
+
+/**
+ * The inputs the corpus has none of: nothing at all, only whitespace, text
+ * ending in a newline, a word wider than the box, each with and without a
+ * line limit. Then every value `maxLines` should treat as "no limit", which
+ * must neither crash nor change the answer.
+ */
+function EdgeSet({
+  width,
+  onDone,
+}: {
+  width: number;
+  onDone: (verdict: Verdict) => void;
+}) {
+  const cases = useMemo(
+    () =>
+      EDGE_STYLES.flatMap(({ id: styleId, style }) =>
+        EDGE_TEXTS.flatMap(sample =>
+          EDGE_LIMITS.map(limit => ({
+            key: `${styleId}/${sample.id}/${limit}`,
+            style,
+            text: sample.text,
+            limit,
+          })),
+        ),
+      ),
+    [],
+  );
+  const font = EDGE_STYLES[0]!.style;
+  const rendered = useRef<Record<string, Rendered>>({});
+  const lines = useRef<Record<string, number>>({});
+  const finished = useRef(false);
+
+  const evaluate = useCallback(() => {
+    if (
+      finished.current ||
+      Object.keys(rendered.current).length < cases.length ||
+      Object.keys(lines.current).length < cases.length
+    ) {
+      return;
+    }
+    finished.current = true;
+
+    const misses: object[] = [];
+    const lineMisses: object[] = [];
+    for (const { key, style, text, limit } of cases) {
+      const real = rendered.current[key]!;
+      const predicted = measure(text, style, width, { maxLines: limit });
+      const deltaHeight = real.height - predicted.height;
+      const deltaWidth =
+        real.width < width - TOLERANCE ? real.width - predicted.width : null;
+      if (
+        !(Math.abs(deltaHeight) <= TOLERANCE) ||
+        (deltaWidth !== null && !(Math.abs(deltaWidth) <= TOLERANCE))
+      ) {
+        misses.push({
+          key,
+          dh: round(deltaHeight),
+          dw: deltaWidth === null ? null : round(deltaWidth),
+        });
+      }
+      if (lines.current[key] !== predicted.lineCount) {
+        lineMisses.push({
+          key,
+          real: lines.current[key],
+          predicted: predicted.lineCount,
+        });
+      }
+    }
+
+    const limitMisses: object[] = [];
+    for (const { id, text } of EDGE_TEXTS) {
+      const unlimited = measure(text, font, width);
+      for (const maxLines of NOT_A_LIMIT) {
+        const result = measure(text, font, width, { maxLines });
+        if (
+          result.height !== unlimited.height ||
+          result.lineCount !== unlimited.lineCount
+        ) {
+          limitMisses.push({ id, maxLines: String(maxLines) });
+        }
+      }
+    }
+
+    onDone({
+      name: 'edge cases',
+      ok:
+        misses.length === 0 &&
+        lineMisses.length === 0 &&
+        limitMisses.length === 0,
+      summary: `${cases.length - misses.length}/${cases.length} size · ${
+        cases.length - lineMisses.length
+      }/${cases.length} lines · ${
+        EDGE_TEXTS.length * NOT_A_LIMIT.length - limitMisses.length
+      }/${EDGE_TEXTS.length * NOT_A_LIMIT.length} non-limits ignored`,
+      details: {
+        misses: misses.slice(0, 8),
+        lineMisses: lineMisses.slice(0, 8),
+        limitMisses: limitMisses.slice(0, 8),
+      },
+    });
+  }, [cases, font, width, onDone]);
+
+  return (
+    <View>
+      {cases.map(({ key, style, text, limit }) => (
+        <Text
+          key={key}
+          numberOfLines={limit || undefined}
+          style={[style, styles.probe, { maxWidth: width }]}
+          onLayout={(event: LayoutChangeEvent) => {
+            const { width: w, height: h } = event.nativeEvent.layout;
+            rendered.current[key] = { width: w, height: h };
+            evaluate();
+          }}
+          onTextLayout={event => {
+            lines.current[key] = event.nativeEvent.lines.length;
+            evaluate();
+          }}
+        >
+          {text}
+        </Text>
+      ))}
+    </View>
+  );
+}
+
+// MARK: - maxLines against numberOfLines
+
+/**
+ * `measure(..., { maxLines })` against `<Text numberOfLines>`: the clamped
+ * height, the lines left showing, and `didTruncate`. Whether a sample really
+ * was cut is decided by the unclamped measurement, whose line count the
+ * matrix above has already checked against the renderer.
+ */
+function TruncateSet({
+  font,
+  fontLabel,
+  maxLines,
+  width,
+  onDone,
+}: {
+  font: MeasurableStyle;
+  fontLabel: string;
+  maxLines: number;
+  width: number;
+  onDone: (verdict: Verdict) => void;
+}) {
+  const rendered = useRef<Record<string, Rendered>>({});
+  const lines = useRef<Record<string, number>>({});
+  const finished = useRef(false);
+
+  const evaluate = useCallback(() => {
+    const total = SAMPLES.length;
+    if (
+      finished.current ||
+      Object.keys(rendered.current).length < total ||
+      Object.keys(lines.current).length < total
+    ) {
+      return;
+    }
+    finished.current = true;
+
+    const misses: object[] = [];
+    const lineMisses: object[] = [];
+    const truncationMisses: object[] = [];
+    let cut = 0;
+    let worst = 0;
+
+    for (const sample of SAMPLES) {
+      const real = rendered.current[sample.id]!;
+      const predicted = measure(sample.text, font, width, { maxLines });
+      const truncated = measure(sample.text, font, width).lineCount > maxLines;
+      if (truncated) {
+        cut += 1;
+      }
+
+      const deltaHeight = real.height - predicted.height;
+      const deltaWidth =
+        real.width < width - TOLERANCE ? real.width - predicted.width : null;
+      const gaps = [deltaHeight, deltaWidth ?? 0].map(Math.abs);
+      if (gaps.some(gap => !(gap <= TOLERANCE))) {
+        misses.push({
+          id: sample.id,
+          dh: round(deltaHeight),
+          dw: deltaWidth === null ? null : round(deltaWidth),
+        });
+      } else {
+        worst = Math.max(worst, ...gaps);
+      }
+
+      if (lines.current[sample.id] !== predicted.lineCount) {
+        lineMisses.push({
+          id: sample.id,
+          real: lines.current[sample.id],
+          predicted: predicted.lineCount,
+        });
+      }
+      if (predicted.didTruncate !== truncated) {
+        truncationMisses.push({
+          id: sample.id,
+          didTruncate: predicted.didTruncate,
+          expected: truncated,
+        });
+      }
+    }
+
+    onDone({
+      name: `${fontLabel} · maxLines ${maxLines}`,
+      ok:
+        misses.length === 0 &&
+        lineMisses.length === 0 &&
+        truncationMisses.length === 0,
+      summary: `${total - misses.length}/${total} size · ${
+        total - lineMisses.length
+      }/${total} lines · ${
+        total - truncationMisses.length
+      }/${total} didTruncate (${cut} cut) · worst ${worst.toFixed(3)}`,
+      details: {
+        misses: misses.slice(0, 6),
+        lineMisses: lineMisses.slice(0, 6),
+        truncationMisses: truncationMisses.slice(0, 6),
+      },
+    });
+  }, [font, fontLabel, maxLines, width, onDone]);
+
+  return (
+    <View>
+      {SAMPLES.map(sample => (
+        <Text
+          key={sample.id}
+          numberOfLines={maxLines}
+          style={[font, styles.probe, { maxWidth: width }]}
+          onLayout={(event: LayoutChangeEvent) => {
+            const { width: w, height: h } = event.nativeEvent.layout;
+            rendered.current[sample.id] = { width: w, height: h };
+            evaluate();
+          }}
+          onTextLayout={event => {
+            lines.current[sample.id] = event.nativeEvent.lines.length;
+            evaluate();
+          }}
+        >
+          {sample.text}
+        </Text>
+      ))}
+    </View>
+  );
+}
+
 // MARK: - Chat list with getItemLayout
 
 const CHAT_STYLE: MeasurableStyle = { fontSize: 16, lineHeight: 22 };
@@ -328,6 +710,7 @@ function ChatCheck({
   width: number;
   onDone: (verdict: Verdict) => void;
 }) {
+  const { fontScale } = useWindowDimensions();
   const messages = useMemo(
     () =>
       Array.from({ length: CHAT_COUNT }, (_, index) => ({
@@ -349,7 +732,10 @@ function ChatCheck({
       offset += length;
       return row;
     });
-  }, [messages, width]);
+    // measureHeights reads the text scale itself; listing it recomputes the
+    // layout when the user changes their text size.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages, width, fontScale]);
 
   const textHeights = useRef(new Map<number, number>());
   const cellOffsets = useRef(new Map<number, number>());

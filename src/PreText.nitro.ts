@@ -46,8 +46,9 @@ export interface TextSpec {
   /**
    * The text scale as a plain multiplier, applied before the cap above.
    *
-   * iOS: the JS layer passes `PixelRatio.getFontScale()`, which reads the same
-   * content-size table RN's renderer uses. Without it nothing is scaled.
+   * iOS: the JS layer passes `Dimensions.get('window').fontScale`, which reads
+   * the same content-size table RN's renderer uses. Without it nothing is
+   * scaled.
    *
    * Android: leave it out and the platform scales the way `<Text>` does,
    * through `TypedValue.applyDimension(COMPLEX_UNIT_SP)`. That is nonlinear
@@ -74,19 +75,25 @@ export interface MeasureOptions {
   /** Mirrors `numberOfLines`; omit or pass 0 for unlimited. */
   maxLines?: number;
   /**
-   * `PixelRatio.get()`. Needed on both platforms, for different reasons.
-   *
-   * Android's text engine works in physical pixels while every number crossing
-   * this boundary is in dp, so the ratio is needed to convert in and back out.
-   * Measuring dp as if it were px is self-consistent enough to look almost
-   * right and is wrong by a pixel or two everywhere.
+   * `PixelRatio.get()`. Read on iOS only.
    *
    * iOS needs it because React Native rounds a text size *up* to the next whole
    * device pixel before Yoga sees it — `ceil(size * pointScaleFactor) /
    * pointScaleFactor`. Returning TextKit's raw fractional value lands short of
    * `onLayout` by up to one pixel, so the same step is applied here.
+   *
+   * Android ignores it. Its text engine works in physical pixels, and the
+   * native side converts dp in and back out with RN's own screen density
+   * (`PixelUtil`), the one the renderer uses. JS's ratio is the window's, which
+   * differs on an external display or under a density override.
    */
   pixelRatio?: number;
+  /**
+   * iOS only. RN 0.88 adds this (0.001) before rounding a text size up to the
+   * pixel grid, so an exactly on-grid height goes up one pixel there. 0, or
+   * left out, for the RN versions that round without it.
+   */
+  roundingEpsilon?: number;
 }
 
 export interface TextMeasurement {
@@ -102,12 +109,18 @@ export interface TextMeasurement {
 }
 
 export interface FontMetrics {
+  /** Distance above the baseline, positive. */
   ascender: number;
+  /** Distance below the baseline, positive on both platforms. */
   descender: number;
   xHeight: number;
   capHeight: number;
   lineGap: number;
-  /** Height of one empty line under this spec. */
+  /**
+   * The font's own line height, or the spec's `lineHeight` when it sets one.
+   * The JS `getFontMetrics()` replaces this with the laid-out height of one
+   * line of text in the spec, padding and pixel rounding included.
+   */
   lineHeight: number;
 }
 

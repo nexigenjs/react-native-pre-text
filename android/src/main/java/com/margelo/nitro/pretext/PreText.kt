@@ -1,12 +1,14 @@
 package com.margelo.nitro.pretext
 
 import android.content.res.AssetManager
+import android.content.res.Configuration
 import android.graphics.Typeface
 import android.os.Build
 import android.text.BoringLayout
 import android.text.Layout
 import android.text.SpannableString
 import android.text.StaticLayout
+import android.text.TextDirectionHeuristics
 import android.text.TextPaint
 import android.text.style.LineHeightSpan
 import android.graphics.Paint
@@ -16,8 +18,11 @@ import com.facebook.react.common.assets.ReactFontManager
 import com.facebook.react.modules.systeminfo.ReactNativeVersion
 import com.facebook.react.uimanager.PixelUtil
 import com.margelo.nitro.NitroModules
+import java.text.BreakIterator
+import java.util.Locale
 import kotlin.math.ceil
 import kotlin.math.floor
+import kotlin.math.max
 import kotlin.math.min
 
 /**
@@ -59,8 +64,13 @@ class PreText : HybridPreTextSpec() {
   private val lock = Any()
 
   private companion object {
-    /** Matches `UNBOUNDED_WIDTH` on the JS side. */
-    const val MAX_LAYOUT_WIDTH = 1_000_000.0
+    /**
+     * Physical pixels. JS's `UNBOUNDED_WIDTH` is 1e6 dp, which is several
+     * million px at a high density; capping that at 1e6 px would wrap a long
+     * "unbounded" line. 2^30 keeps every Int conversion and StaticLayout's own
+     * arithmetic safe while staying far past any real text.
+     */
+    const val MAX_LAYOUT_WIDTH = 1_073_741_824.0
 
     /** Per generation. Two are live at once, so the ceiling is 1024 entries. */
     const val CACHE_CAP = 512
@@ -73,6 +83,13 @@ class PreText : HybridPreTextSpec() {
     const val CAP_HEIGHT_GLYPH = "T"
     const val X_HEIGHT_GLYPH = "x"
     const val GLYPH_AMPLIFICATION = 100f
+
+    /** `stylistic-one` … `stylistic-twenty` → OpenType `ss01` … `ss20`. */
+    val STYLISTIC_SETS: Map<String, Int> = listOf(
+      "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+      "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen",
+      "eighteen", "nineteen", "twenty"
+    ).mapIndexed { index, name -> "stylistic-$name" to index + 1 }.toMap()
   }
 
   // MARK: - Public API
@@ -119,7 +136,11 @@ class PreText : HybridPreTextSpec() {
       xHeight = glyphHeight(paint, X_HEIGHT_GLYPH) / density,
       capHeight = glyphHeight(paint, CAP_HEIGHT_GLYPH) / density,
       lineGap = metrics.leading / density,
-      lineHeight = (sizes.lineHeightPx ?: (metrics.descent - metrics.ascent)) / density
+      // The span renders ceil(px). JS replaces this value with a laid-out line.
+      lineHeight = (
+        sizes.lineHeightPx?.let { ceil(it.toDouble()) }
+          ?: (metrics.descent - metrics.ascent).toDouble()
+        ) / density
     )
   }
 
@@ -178,7 +199,9 @@ class PreText : HybridPreTextSpec() {
     spec.fontStyle ?: "",
     spec.lineHeight?.toString() ?: "",
     spec.letterSpacing?.toString() ?: "",
-    spec.textTransform ?: "",
+    // Case mapping follows the device locale, which can change while the app
+    // runs; it only matters when there is a transform.
+    spec.textTransform?.let { "$it@${Locale.getDefault().toLanguageTag()}" } ?: "",
     (spec.fontVariant ?: emptyArray()).joinToString(","),
     // The resolved sizes rather than the scaling props: they also carry the
     // system text size, which no field of `spec` does on this platform.
@@ -189,7 +212,7 @@ class PreText : HybridPreTextSpec() {
     spec.hyphenationFrequency ?: "",
     options.maxWidth.toString(),
     (options.maxLines ?: 0.0).toString(),
-    (options.pixelRatio ?: 1.0).toString()
+    densityOf(options).toString()
   ).joinToString("_")
 
   // MARK: - Measurement
@@ -207,14 +230,16 @@ class PreText : HybridPreTextSpec() {
     // RN's AT_MOST path floors the physical-pixel constraint before handing
     // it to StaticLayout. Ceil here can move a near-boundary word to the
     // previous line compared with the real <Text>.
-    val width = floor(options.maxWidth * density)
+    // In Float, as RN's dpToPx is: a Double product can floor a pixel apart.
+    val width = floor(options.maxWidth.toFloat() * density.toFloat())
+      .toDouble()
       .coerceIn(0.0, MAX_LAYOUT_WIDTH)
       .toInt()
 
     val source: CharSequence = sizes.lineHeightPx?.let { lineHeight ->
       SpannableString(text).apply {
         setSpan(
-          lineHeightSpan(ceil(lineHeight.toDouble()).toInt()),
+          RNLineHeightSpan(ceil(lineHeight.toDouble()).toInt()),
           0,
           text.length,
           SpannableString.SPAN_INCLUSIVE_INCLUSIVE
@@ -223,7 +248,7 @@ class PreText : HybridPreTextSpec() {
     } ?: text
 
     val includeFontPadding = spec.includeFontPadding ?: true
-    val boring = BoringLayout.isBoring(source, paint)
+    val boring = boringMetrics(source, paint)
     val layout: Layout
     val usesIntrinsicWidth: Boolean
 
@@ -275,8 +300,14 @@ class PreText : HybridPreTextSpec() {
       lastLineWidth = lineWidth
     }
 
-    val didTruncate =
-      maxLines > 0 && layout.getLineEnd(layout.lineCount - 1) < source.length
+    // With `TruncateAt.END` the last kept line still ends at the end of the
+    // text, so a short `getLineEnd` never shows the cut. The characters the
+    // ellipsis stands in for do.
+    val lastLine = layout.lineCount - 1
+    val didTruncate = maxLines > 0 && lastLine >= 0 && (
+      layout.getEllipsisCount(lastLine) > 0 ||
+        layout.getLineEnd(lastLine) < source.length
+      )
 
     // Back to dp — the units `onLayout` reports.
     return TextMeasurement(
@@ -291,39 +322,31 @@ class PreText : HybridPreTextSpec() {
     )
   }
 
-  private fun densityOf(options: MeasureOptions): Double {
-    val value = options.pixelRatio ?: 1.0
-    return if (value > 0) value else 1.0
-  }
-
   /**
-   * RN's `CustomLineHeightSpan`, in whichever form the host app's RN ships.
+   * The screen density RN converts with, not JS's `PixelRatio.get()`.
    *
-   * RN 0.77 replaced the span (facebook/react-native#47271). At ordinary sizes
-   * the two agree, so a corpus at the default text size cannot tell them apart.
-   * They part ways once `lineHeight` gets close to the font's own height, which
-   * is exactly where a large system text size puts it on Android 14+: the font
-   * grows faster than the line height there, and the old cascade then leaves
-   * interior lines at the font's natural height instead of the one asked for.
+   * RN's text pipeline (`PixelUtil`, `DisplayMetricsHolder`) works in the
+   * screen's metrics, while `PixelRatio.get()` is the window's. They agree on
+   * an ordinary phone and part ways on an external display, in desktop
+   * windowing or under a density override. Sizing the font in one and the
+   * box in the other would measure a font of the wrong size in the box.
    */
-  private fun lineHeightSpan(height: Int): LineHeightSpan =
-    if (usesCssLineHeight) CssLineHeightSpan(height) else LegacyLineHeightSpan(height)
-
-  /** RN 0.77 and later. Read once: the RN in the process cannot change. */
-  private val usesCssLineHeight: Boolean by lazy {
-    val version = ReactNativeVersion.VERSION
-    val major = version["major"] as? Int ?: 0
-    val minor = version["minor"] as? Int ?: 0
-    major > 0 || minor >= 77
-  }
+  @Suppress("UNUSED_PARAMETER")
+  private fun densityOf(options: MeasureOptions): Double =
+    PixelUtil.getDisplayMetricDensity().toDouble()
 
   /**
-   * A line-for-line port of RN 0.77+'s `CustomLineHeightSpan`, which follows
-   * CSS: the leading is split around the first font's ascent and descent, and
-   * only the paragraph's first top and last bottom are pinned, so interior
-   * line boxes may overlap the way they do on the web.
+   * A line-for-line port of RN's `CustomLineHeightSpan` (0.77 and later, so
+   * every version this package supports), which follows CSS: the leading is
+   * split around the first font's ascent and descent, and only the
+   * paragraph's first top and last bottom are pinned, so interior line boxes
+   * may overlap the way they do on the web.
+   *
+   * The pre-0.77 span agreed with this one at ordinary sizes and parted ways
+   * once `lineHeight` neared the font's own height, which is where a large
+   * Android 14+ text size puts it.
    */
-  private class CssLineHeightSpan(private val height: Int) : LineHeightSpan {
+  private class RNLineHeightSpan(private val height: Int) : LineHeightSpan {
     override fun chooseHeight(
       text: CharSequence,
       start: Int,
@@ -344,44 +367,6 @@ class PreText : HybridPreTextSpec() {
     }
   }
 
-  /**
-   * A line-for-line port of `CustomLineHeightSpan` before RN 0.77. The cascade
-   * matters: pinning `top = ascent` unconditionally cancels the font padding
-   * and comes out exactly 1dp short, whatever the line count.
-   */
-  private class LegacyLineHeightSpan(private val height: Int) : LineHeightSpan {
-    override fun chooseHeight(
-      text: CharSequence?,
-      start: Int,
-      end: Int,
-      spanstartv: Int,
-      v: Int,
-      fm: Paint.FontMetricsInt
-    ) {
-      if (fm.descent > height) {
-        fm.descent = minOf(height, fm.descent)
-        fm.bottom = fm.descent
-        fm.ascent = -height + fm.descent
-        fm.top = fm.ascent
-      } else if (-fm.ascent + fm.descent > height) {
-        fm.bottom = fm.descent
-        fm.ascent = -height + fm.descent
-        fm.top = fm.ascent
-      } else if (-fm.ascent + fm.bottom > height) {
-        fm.top = fm.ascent
-        fm.bottom = fm.ascent + height
-      } else if (-fm.top + fm.bottom > height) {
-        fm.top = fm.bottom - height
-      } else {
-        val additional = height - (-fm.top + fm.bottom)
-        fm.top -= ceil(additional / 2.0).toInt()
-        fm.bottom += floor(additional / 2.0).toInt()
-        fm.ascent = fm.top
-        fm.descent = fm.bottom
-      }
-    }
-  }
-
   // MARK: - Paint
 
   /**
@@ -393,9 +378,12 @@ class PreText : HybridPreTextSpec() {
     val fontPx: Int,
     val lineHeightPx: Float?,
     /** Ems, which is what `Paint.letterSpacing` takes. */
-    val letterSpacingEm: Float?
+    val letterSpacingEm: Float?,
+    /** Android's "Bold text" setting, as RN applies it; 0 when it does not. */
+    val weightAdjustment: Int
   ) {
-    val key: String get() = "${fontPx}_${lineHeightPx ?: ""}_${letterSpacingEm ?: ""}"
+    val key: String get() =
+      "${fontPx}_${lineHeightPx ?: ""}_${letterSpacingEm ?: ""}_$weightAdjustment"
   }
 
   /**
@@ -413,7 +401,9 @@ class PreText : HybridPreTextSpec() {
     val linear = spec.fontScale?.takeIf { it > 0 }
 
     fun toPixels(value: Double, cap: Float): Float = when {
-      !allowScaling -> (value * density).toFloat()
+      // RN's toPixelFromDIP multiplies in Float; doing it in Double first can
+      // land on the other side of the ceil below (9.6 at 2.8125 is one such).
+      !allowScaling -> value.toFloat() * density.toFloat()
       linear != null -> {
         val scaled = value * linear * density
         (if (cap >= 1) min(scaled, value * cap * density) else scaled).toFloat()
@@ -428,33 +418,74 @@ class PreText : HybridPreTextSpec() {
       lineHeightPx = spec.lineHeight?.let { toPixels(it, Float.NaN) },
       letterSpacingEm = spec.letterSpacing?.let {
         if (fontPx > 0) toPixels(it, Float.NaN) / fontPx else null
-      }
+      },
+      weightAdjustment = fontWeightAdjustment()
     )
+  }
+
+  /**
+   * The accessibility "Bold text" setting (Android 12+), which RN 0.88 and
+   * later add to the weight of every typeface it draws
+   * (`ReactTypefaceUtils.applyFontWeightAdjustment`). Earlier RN ignores it, so
+   * measuring with it there would come out too wide.
+   */
+  private fun fontWeightAdjustment(): Int {
+    if (!rnAppliesFontWeightAdjustment || Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+      return 0
+    }
+    val adjustment = NitroModules.applicationContext
+      ?.resources?.configuration?.fontWeightAdjustment ?: 0
+    return if (adjustment == Configuration.FONT_WEIGHT_ADJUSTMENT_UNDEFINED) 0 else adjustment
+  }
+
+  /** Read once: the RN in the process cannot change. */
+  private val rnAppliesFontWeightAdjustment: Boolean by lazy {
+    val version = ReactNativeVersion.VERSION
+    val major = version["major"] as? Int ?: 0
+    val minor = version["minor"] as? Int ?: 0
+    major > 0 || minor >= 88
+  }
+
+  /**
+   * RN's `isBoring`: fallback fonts' line spacing counts from Android 13, as
+   * TextView's does, so a short single line of CJK, Thai or Devanagari gets
+   * the taller extents it is drawn with. A negative width, which isBoring
+   * reports for some strings, means StaticLayout instead.
+   */
+  private fun boringMetrics(text: CharSequence, paint: TextPaint): BoringLayout.Metrics? {
+    val metrics = if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+      BoringLayout.isBoring(text, paint)
+    } else {
+      BoringLayout.isBoring(text, paint, TextDirectionHeuristics.FIRSTSTRONG_LTR, true, null)
+    }
+    return if (metrics == null || metrics.width < 0) null else metrics
   }
 
   private fun buildPaint(spec: TextSpec, sizes: Sizes): TextPaint {
     val paint = TextPaint(Paint.ANTI_ALIAS_FLAG)
     paint.textSize = sizes.fontPx.toFloat()
-    paint.typeface = resolveTypeface(spec)
+    paint.typeface = adjustWeight(resolveTypeface(spec), sizes.weightAdjustment)
 
     // RN applies a CustomStyleSpan whenever any font selector is present.
     // Besides resolving the Typeface, that span enables both flags below.
     // They materially change glyph advances for spaces, fallback fonts and
     // emoji, so omitting them makes width drift by several physical pixels.
-    if (
-      spec.fontFamily != null ||
-      spec.fontWeight != null ||
-      spec.fontStyle != null
-    ) {
+    val hasFontSelector =
+      spec.fontFamily != null || spec.fontWeight != null || spec.fontStyle != null
+    if (hasFontSelector) {
       paint.isSubpixelText = true
       paint.isLinearText = true
     }
 
     sizes.letterSpacingEm?.let { paint.letterSpacing = it }
 
-    spec.fontVariant?.let { variants ->
-      val features = variants.mapNotNull { featureFor(it) }
-      if (features.isNotEmpty()) paint.fontFeatureSettings = features.joinToString(", ")
+    // The same span is the only thing that carries font features, so RN draws
+    // a fontVariant only when one of those selectors is set too.
+    if (hasFontSelector) {
+      spec.fontVariant?.let { variants ->
+        val features = variants.mapNotNull { featureFor(it) }
+        if (features.isNotEmpty()) paint.fontFeatureSettings = features.joinToString(", ")
+      }
     }
 
     return paint
@@ -483,13 +514,21 @@ class PreText : HybridPreTextSpec() {
     return bounds.height() / GLYPH_AMPLIFICATION.toDouble()
   }
 
+  /** The variants Fabric forwards on Android (`TextAttributeProps.setFontVariant`). */
   private fun featureFor(variant: String): String? = when (variant) {
     "small-caps" -> "'smcp'"
     "tabular-nums" -> "'tnum'"
     "proportional-nums" -> "'pnum'"
     "oldstyle-nums" -> "'onum'"
     "lining-nums" -> "'lnum'"
-    else -> null
+    // Locale.ROOT, or an Arabic-locale device would format the digits as ٠١.
+    else -> STYLISTIC_SETS[variant]?.let { String.format(Locale.ROOT, "'ss%02d'", it) }
+  }
+
+  private fun adjustWeight(typeface: Typeface, adjustment: Int): Typeface {
+    if (adjustment == 0 || Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return typeface
+    val weight = min(max(typeface.weight + adjustment, 1), 1000)
+    return Typeface.create(typeface, weight, typeface.isItalic)
   }
 
   /**
@@ -561,11 +600,26 @@ class PreText : HybridPreTextSpec() {
     else -> 400
   }
 
+  /**
+   * A port of RN's `applyTextTransform`: the device locale for case mapping
+   * (Turkish dotted I) and `BreakIterator` words for capitalize, so
+   * "hello-world" and a word after a newline capitalize as they render.
+   */
   private fun transform(text: String, spec: TextSpec): String = when (spec.textTransform) {
-    "uppercase" -> text.uppercase()
-    "lowercase" -> text.lowercase()
-    "capitalize" -> text.split(" ").joinToString(" ") { word ->
-      word.replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
+    "uppercase" -> text.uppercase(Locale.getDefault())
+    "lowercase" -> text.lowercase(Locale.getDefault())
+    "capitalize" -> {
+      val words = BreakIterator.getWordInstance()
+      words.setText(text)
+      val result = StringBuilder(text.length)
+      var start = words.first()
+      var end = words.next()
+      while (end != BreakIterator.DONE) {
+        result.append(text.substring(start, end).replaceFirstChar { it.uppercaseChar() })
+        start = end
+        end = words.next()
+      }
+      result.toString()
     }
     else -> text
   }
