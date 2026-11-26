@@ -84,6 +84,62 @@ jobs:
         run: ./gradlew :nexigen_react-native-pre-text:assembleDebug --console=plain
         working-directory: example/android
 
+  # Builds compile; this one checks the library still measures what <Text>
+  # renders. It runs example/'s self-checks on an emulator at three system text
+  # sizes and fails on any check outside the README's Known limits. The library
+  # mirrors React Native's own text code line for line, so this is the job that
+  # notices when a React Native release changes that code underneath it.
+  android-checks:
+    name: android device checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - run: npm ci
+      - run: npm ci
+        working-directory: example
+
+      - name: Install NDK
+        run: $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install "ndk;27.1.12297006"
+
+      # Release rather than debug: the JS bundle goes inside the APK, so the
+      # emulator needs no Metro server. Only the emulator's architecture.
+      - name: Build example
+        run: ./gradlew :app:assembleRelease -PreactNativeArchitectures=x86_64 --console=plain
+        working-directory: example/android
+
+      # Hardware acceleration for the emulator on GitHub's Linux runners.
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      # API 34 is where Android's nonlinear font scaling begins.
+      - name: Run self-checks on an emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          script: |
+            adb install -r example/android/app/build/outputs/apk/release/app-release.apk
+            node scripts/android-device-checks.mjs
+
   ios:
     name: ios
     runs-on: macos-15
