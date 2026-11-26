@@ -7,16 +7,19 @@ import type {
   TextSpec,
 } from './PreText.nitro';
 import { getModule } from './module';
-import { toSpec, type MeasurableStyle } from './style';
+import { toSpec, type FontScaling, type MeasurableStyle } from './style';
 
 export type { FontMetrics, MeasureOptions, TextMeasurement, TextSpec };
-export type { MeasurableStyle };
+export type { FontScaling, MeasurableStyle };
 
-export type MeasureConfig = {
+/**
+ * Per-call settings. The scaling fields mirror the `<Text>` props of the same
+ * name and share their defaults, so a `<Text>` that sets none of them needs
+ * none here either.
+ */
+export type MeasureConfig = FontScaling & {
   /** Mirrors `numberOfLines`; omit for unlimited. */
   maxLines?: number;
-  /** Dynamic Type multiplier; defaults to 1. */
-  fontScale?: number;
 };
 
 function options(width: number, config?: MeasureConfig): MeasureOptions {
@@ -36,7 +39,7 @@ export function measure(
 ): TextMeasurement {
   return getModule().measure(
     text,
-    toSpec(style, config?.fontScale),
+    toSpec(style, config),
     options(width, config),
   );
 }
@@ -60,7 +63,7 @@ export function measureBatch(
 ): TextMeasurement[] {
   return getModule().measureBatch(
     texts,
-    toSpec(style, config?.fontScale),
+    toSpec(style, config),
     options(width, config),
   );
 }
@@ -90,10 +93,10 @@ export function getFontMetrics(
   style: MeasurableStyle,
   config?: MeasureConfig,
 ): FontMetrics {
-  return getModule().getFontMetrics(toSpec(style, config?.fontScale));
+  return getModule().getFontMetrics(toSpec(style, config));
 }
 
-/** Call after a font finishes loading or the system font scale changes. */
+/** Call after a font finishes loading. A system text size change needs nothing. */
 export function clearCache(): void {
   getModule().clearCache();
 }

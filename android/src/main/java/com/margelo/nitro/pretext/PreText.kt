@@ -13,9 +13,12 @@ import android.graphics.Paint
 import android.graphics.Rect
 import com.facebook.proguard.annotations.DoNotStrip
 import com.facebook.react.common.assets.ReactFontManager
+import com.facebook.react.modules.systeminfo.ReactNativeVersion
+import com.facebook.react.uimanager.PixelUtil
 import com.margelo.nitro.NitroModules
 import kotlin.math.ceil
 import kotlin.math.floor
+import kotlin.math.min
 
 /**
  * `StaticLayout` — the same class `TextView` uses. The knobs mirror
@@ -80,8 +83,9 @@ class PreText : HybridPreTextSpec() {
     options: MeasureOptions
   ): TextMeasurement = synchronized(lock) {
     val density = densityOf(options)
-    val specKey = layoutKey(spec, options)
-    cached(text, spec, specKey, options, density) { buildPaint(spec, density) }
+    val sizes = sizesOf(spec, density)
+    val specKey = layoutKey(spec, sizes, options)
+    cached(text, spec, specKey, options, density, sizes) { buildPaint(spec, sizes) }
   }
 
   override fun measureBatch(
@@ -90,27 +94,32 @@ class PreText : HybridPreTextSpec() {
     options: MeasureOptions
   ): Array<TextMeasurement> = synchronized(lock) {
     val density = densityOf(options)
-    val specKey = layoutKey(spec, options)
+    val sizes = sizesOf(spec, density)
+    val specKey = layoutKey(spec, sizes, options)
     // Built at most once for the batch, and not at all on a full cache hit.
     var paint: TextPaint? = null
     Array(texts.size) { i ->
-      cached(texts[i], spec, specKey, options, density) {
+      cached(texts[i], spec, specKey, options, density, sizes) {
         val existing = paint
-        existing ?: buildPaint(spec, density).also { paint = it }
+        existing ?: buildPaint(spec, sizes).also { paint = it }
       }
     }
   }
 
   override fun getFontMetrics(spec: TextSpec): FontMetrics = synchronized(lock) {
-    val paint = buildPaint(spec, 1.0)
+    // Built at the screen's real density, because that is where RN rounds the
+    // font to a whole pixel, then read back in dp.
+    val density = PixelUtil.getDisplayMetricDensity().toDouble()
+    val sizes = sizesOf(spec, density)
+    val paint = buildPaint(spec, sizes)
     val metrics = paint.fontMetrics
     FontMetrics(
-      ascender = (-metrics.ascent).toDouble(),
-      descender = metrics.descent.toDouble(),
-      xHeight = glyphHeight(paint, X_HEIGHT_GLYPH),
-      capHeight = glyphHeight(paint, CAP_HEIGHT_GLYPH),
-      lineGap = metrics.leading.toDouble(),
-      lineHeight = spec.lineHeight ?: (metrics.descent - metrics.ascent).toDouble()
+      ascender = -metrics.ascent / density,
+      descender = metrics.descent / density,
+      xHeight = glyphHeight(paint, X_HEIGHT_GLYPH) / density,
+      capHeight = glyphHeight(paint, CAP_HEIGHT_GLYPH) / density,
+      lineGap = metrics.leading / density,
+      lineHeight = (sizes.lineHeightPx ?: (metrics.descent - metrics.ascent)) / density
     )
   }
 
@@ -129,6 +138,7 @@ class PreText : HybridPreTextSpec() {
     specKey: String,
     options: MeasureOptions,
     density: Double,
+    sizes: Sizes,
     paint: () -> TextPaint
   ): TextMeasurement {
     // NUL separates the two halves so no text can forge a spec key.
@@ -141,7 +151,7 @@ class PreText : HybridPreTextSpec() {
       return it
     }
 
-    val result = measureWith(paint(), text, spec, options, density)
+    val result = measureWith(paint(), text, spec, options, density, sizes)
 
     hotCache[key] = result
     if (hotCache.size >= CACHE_CAP) {
@@ -157,7 +167,11 @@ class PreText : HybridPreTextSpec() {
    * `hyphenationFrequency`, which are ignored on iOS but decide the layout
    * here.
    */
-  private fun layoutKey(spec: TextSpec, options: MeasureOptions): String = listOf(
+  private fun layoutKey(
+    spec: TextSpec,
+    sizes: Sizes,
+    options: MeasureOptions
+  ): String = listOf(
     spec.fontFamily ?: "",
     spec.fontSize.toString(),
     spec.fontWeight ?: "",
@@ -166,7 +180,9 @@ class PreText : HybridPreTextSpec() {
     spec.letterSpacing?.toString() ?: "",
     spec.textTransform ?: "",
     (spec.fontVariant ?: emptyArray()).joinToString(","),
-    scaleOf(spec).toString(),
+    // The resolved sizes rather than the scaling props: they also carry the
+    // system text size, which no field of `spec` does on this platform.
+    sizes.key,
     spec.writingDirection ?: "",
     (spec.includeFontPadding ?: true).toString(),
     spec.textBreakStrategy ?: "",
@@ -183,7 +199,8 @@ class PreText : HybridPreTextSpec() {
     rawText: String,
     spec: TextSpec,
     options: MeasureOptions,
-    density: Double
+    density: Double,
+    sizes: Sizes
   ): TextMeasurement {
     val text = transform(rawText, spec)
     val maxLines = (options.maxLines ?: 0.0).toInt()
@@ -194,12 +211,10 @@ class PreText : HybridPreTextSpec() {
       .coerceIn(0.0, MAX_LAYOUT_WIDTH)
       .toInt()
 
-    val source: CharSequence = spec.lineHeight?.let { lineHeight ->
+    val source: CharSequence = sizes.lineHeightPx?.let { lineHeight ->
       SpannableString(text).apply {
         setSpan(
-          RNLineHeightSpan(
-            ceil(lineHeight * scaleOf(spec) * density).toInt()
-          ),
+          lineHeightSpan(ceil(lineHeight.toDouble()).toInt()),
           0,
           text.length,
           SpannableString.SPAN_INCLUSIVE_INCLUSIVE
@@ -282,11 +297,59 @@ class PreText : HybridPreTextSpec() {
   }
 
   /**
-   * A line-for-line port of RN's `CustomLineHeightSpan`. The cascade matters:
-   * pinning `top = ascent` unconditionally cancels the font padding and comes
-   * out exactly 1dp short, whatever the line count.
+   * RN's `CustomLineHeightSpan`, in whichever form the host app's RN ships.
+   *
+   * RN 0.77 replaced the span (facebook/react-native#47271). At ordinary sizes
+   * the two agree, so a corpus at the default text size cannot tell them apart.
+   * They part ways once `lineHeight` gets close to the font's own height, which
+   * is exactly where a large system text size puts it on Android 14+: the font
+   * grows faster than the line height there, and the old cascade then leaves
+   * interior lines at the font's natural height instead of the one asked for.
    */
-  private class RNLineHeightSpan(private val height: Int) : LineHeightSpan {
+  private fun lineHeightSpan(height: Int): LineHeightSpan =
+    if (usesCssLineHeight) CssLineHeightSpan(height) else LegacyLineHeightSpan(height)
+
+  /** RN 0.77 and later. Read once: the RN in the process cannot change. */
+  private val usesCssLineHeight: Boolean by lazy {
+    val version = ReactNativeVersion.VERSION
+    val major = version["major"] as? Int ?: 0
+    val minor = version["minor"] as? Int ?: 0
+    major > 0 || minor >= 77
+  }
+
+  /**
+   * A line-for-line port of RN 0.77+'s `CustomLineHeightSpan`, which follows
+   * CSS: the leading is split around the first font's ascent and descent, and
+   * only the paragraph's first top and last bottom are pinned, so interior
+   * line boxes may overlap the way they do on the web.
+   */
+  private class CssLineHeightSpan(private val height: Int) : LineHeightSpan {
+    override fun chooseHeight(
+      text: CharSequence,
+      start: Int,
+      end: Int,
+      spanstartv: Int,
+      v: Int,
+      fm: Paint.FontMetricsInt
+    ) {
+      val leading = height - ((-fm.ascent) + fm.descent)
+      fm.ascent -= ceil(leading / 2.0f).toInt()
+      fm.descent += floor(leading / 2.0f).toInt()
+      if (start == 0) {
+        fm.top = fm.ascent
+      }
+      if (end == text.length) {
+        fm.bottom = fm.descent
+      }
+    }
+  }
+
+  /**
+   * A line-for-line port of `CustomLineHeightSpan` before RN 0.77. The cascade
+   * matters: pinning `top = ascent` unconditionally cancels the font padding
+   * and comes out exactly 1dp short, whatever the line count.
+   */
+  private class LegacyLineHeightSpan(private val height: Int) : LineHeightSpan {
     override fun chooseHeight(
       text: CharSequence?,
       start: Int,
@@ -321,15 +384,57 @@ class PreText : HybridPreTextSpec() {
 
   // MARK: - Paint
 
-  private fun scaleOf(spec: TextSpec): Double {
-    val value = spec.fontScale ?: 1.0
-    return if (value > 0) value else 1.0
+  /**
+   * Font size, line height and letter spacing in physical pixels, resolved
+   * the way RN's `TextAttributeProps` resolves them for a real `<Text>`.
+   */
+  private class Sizes(
+    /** Whole pixels: RN ceils the size and hands `ReactAbsoluteSizeSpan` an Int. */
+    val fontPx: Int,
+    val lineHeightPx: Float?,
+    /** Ems, which is what `Paint.letterSpacing` takes. */
+    val letterSpacingEm: Float?
+  ) {
+    val key: String get() = "${fontPx}_${lineHeightPx ?: ""}_${letterSpacingEm ?: ""}"
   }
 
-  private fun buildPaint(spec: TextSpec, density: Double): TextPaint {
+  /**
+   * A port of `TextAttributeProps` — `setFontSize`, the `lineHeight` setter
+   * and the `letterSpacing` getter.
+   *
+   * With scaling on, RN converts through `PixelUtil.toPixelFromSP`, which is
+   * `TypedValue.applyDimension(COMPLEX_UNIT_SP)`. From Android 14 that curve is
+   * nonlinear, so it is called here rather than imitated with a multiplier.
+   * Only the font size honours `maxFontSizeMultiplier`: RN converts the line
+   * height and letter spacing without a cap, and so does this.
+   */
+  private fun sizesOf(spec: TextSpec, density: Double): Sizes {
+    val allowScaling = spec.allowFontScaling ?: true
+    val linear = spec.fontScale?.takeIf { it > 0 }
+
+    fun toPixels(value: Double, cap: Float): Float = when {
+      !allowScaling -> (value * density).toFloat()
+      linear != null -> {
+        val scaled = value * linear * density
+        (if (cap >= 1) min(scaled, value * cap * density) else scaled).toFloat()
+      }
+      else -> PixelUtil.toPixelFromSP(value.toFloat(), cap)
+    }
+
+    val cap = spec.maxFontSizeMultiplier?.toFloat() ?: Float.NaN
+    val fontPx = ceil(toPixels(spec.fontSize, cap).toDouble()).toInt()
+    return Sizes(
+      fontPx = fontPx,
+      lineHeightPx = spec.lineHeight?.let { toPixels(it, Float.NaN) },
+      letterSpacingEm = spec.letterSpacing?.let {
+        if (fontPx > 0) toPixels(it, Float.NaN) / fontPx else null
+      }
+    )
+  }
+
+  private fun buildPaint(spec: TextSpec, sizes: Sizes): TextPaint {
     val paint = TextPaint(Paint.ANTI_ALIAS_FLAG)
-    val size = (spec.fontSize * scaleOf(spec) * density).toFloat()
-    paint.textSize = size
+    paint.textSize = sizes.fontPx.toFloat()
     paint.typeface = resolveTypeface(spec)
 
     // RN applies a CustomStyleSpan whenever any font selector is present.
@@ -345,12 +450,7 @@ class PreText : HybridPreTextSpec() {
       paint.isLinearText = true
     }
 
-    spec.letterSpacing?.let { spacing ->
-      // Android wants ems, RN gives dp; density cancels out in the ratio.
-      if (spec.fontSize > 0) {
-        paint.letterSpacing = (spacing / (spec.fontSize * scaleOf(spec))).toFloat()
-      }
-    }
+    sizes.letterSpacingEm?.let { paint.letterSpacing = it }
 
     spec.fontVariant?.let { variants ->
       val features = variants.mapNotNull { featureFor(it) }

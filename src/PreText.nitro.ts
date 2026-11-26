@@ -33,10 +33,27 @@ export interface TextSpec {
   /** e.g. `['tabular-nums']` — changes advances, so it changes wrapping. */
   fontVariant?: string[];
   /**
-   * Resolved Dynamic Type multiplier. Pass 1 when `allowFontScaling` is off;
-   * otherwise pass the current system scale, already clamped by
-   * `maxFontSizeMultiplier`. Kept explicit so a measurement is reproducible
-   * instead of silently depending on device state.
+   * Mirrors `<Text allowFontScaling>`, and like it defaults to true. False
+   * measures at the style's own size whatever the system text size is.
+   */
+  allowFontScaling?: boolean;
+  /**
+   * Mirrors `<Text maxFontSizeMultiplier>`. A value of 1 or more caps the
+   * system text scale; anything else, including leaving it out, leaves it
+   * uncapped, which is RN's own rule.
+   */
+  maxFontSizeMultiplier?: number;
+  /**
+   * The text scale as a plain multiplier, applied before the cap above.
+   *
+   * iOS: the JS layer passes `PixelRatio.getFontScale()`, which reads the same
+   * content-size table RN's renderer uses. Without it nothing is scaled.
+   *
+   * Android: leave it out and the platform scales the way `<Text>` does,
+   * through `TypedValue.applyDimension(COMPLEX_UNIT_SP)`. That is nonlinear
+   * from Android 14 — large sizes grow less than small ones — so no single
+   * multiplier reproduces it. A value here overrides the system with a fixed
+   * linear scale.
    */
   fontScale?: number;
   /** `'auto' | 'ltr' | 'rtl'`. */
@@ -124,11 +141,11 @@ export interface PreText
   /**
    * Drops the resolved fonts and every cached measurement.
    *
-   * Call after a font finishes loading or the system font scale changes — both
-   * change what the same inputs would measure to, and a cache keyed on those
-   * inputs cannot see it happen. Nothing else invalidates: the key already
-   * covers every field the platform reads, so a different style or width is a
-   * different entry rather than a stale one.
+   * Call after a font finishes loading: that changes what the same inputs
+   * would measure to, and a cache keyed on those inputs cannot see it happen.
+   * Nothing else invalidates. The key already covers every field the platform
+   * reads, including the resolved text scale, so a different style, width or
+   * system text size is a different entry rather than a stale one.
    */
   clearCache(): void;
 }

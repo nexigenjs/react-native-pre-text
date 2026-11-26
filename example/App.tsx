@@ -20,6 +20,7 @@ import {
 } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 
+import { ChecksPanel, ChecksRunner, type Verdict } from './src/Checks';
 import { SAMPLES, type Sample } from './src/corpus';
 import { FONT_OPTIONS, type FontOption } from './src/fonts';
 import { MeasuredRow } from './src/MeasuredRow';
@@ -48,6 +49,7 @@ function AppContent() {
   const { width: screenWidth } = useWindowDimensions();
   const availableWidth = textWidthFor(screenWidth);
   const [selectedFont, setSelectedFont] = useState(FONT_OPTIONS[0]!);
+  const [verdicts, setVerdicts] = useState<Verdict[]>([]);
   const font = useMemo<MeasurableStyle>(
     () => ({ ...FONT, fontFamily: selectedFont.fontFamily }),
     [selectedFont.fontFamily],
@@ -90,9 +92,12 @@ function AppContent() {
             availableWidth={availableWidth}
             selectedFont={selectedFont}
             font={font}
+            verdicts={verdicts}
           />
         }
       />
+      {/* Beside the list, not in it, and taking no space. */}
+      <ChecksRunner width={availableWidth} onChange={setVerdicts} />
     </SafeAreaView>
   );
 }
@@ -106,6 +111,7 @@ type HeaderProps = {
   availableWidth: number;
   selectedFont: FontOption;
   font: MeasurableStyle;
+  verdicts: Verdict[];
 };
 
 function Header({
@@ -113,6 +119,7 @@ function Header({
   availableWidth,
   selectedFont,
   font,
+  verdicts,
 }: HeaderProps) {
   return (
     <View style={styles.header}>
@@ -121,6 +128,8 @@ function Header({
         {SAMPLES.length} cases · {selectedFont.label} {FONT.fontSize}/
         {FONT.lineHeight}
       </Text>
+
+      <ChecksPanel verdicts={verdicts} />
 
       <Summary key={selectedFont.id} width={availableWidth} font={font} />
 

@@ -157,7 +157,7 @@ export function Summary({
        * what gives way is the glyph, not the box. Vacuously true with no
        * `lineHeight` set, because then nothing is pinning anything.
        */
-      fits: box === undefined || inked <= box,
+      fits: box === undefined || inked <= metrics.lineHeight,
       /** Weak on purpose — see the note rendered under the panel. */
       ordered:
         metrics.xHeight > 0 &&
@@ -271,7 +271,6 @@ export function Summary({
           <Text
             key={sample.id}
             style={[font, styles.probe, { maxWidth: width }]}
-            allowFontScaling={false}
             onLayout={(event: LayoutChangeEvent) => {
               const { width: renderedWidth, height: renderedHeight } =
                 event.nativeEvent.layout;
@@ -294,7 +293,6 @@ export function Summary({
           >
             <Text
               style={font}
-              allowFontScaling={false}
               onLayout={(event: LayoutChangeEvent) => {
                 onIntrinsicLayout(sample.id, event.nativeEvent.layout.width);
               }}
@@ -360,7 +358,7 @@ export function Summary({
               )} · no lineHeight to pin the box`
             : `ascender + descender ${fontMetrics.inked.toFixed(2)} ${
                 fontMetrics.fits ? 'fits' : 'overflows'
-              } lineHeight ${font.lineHeight.toFixed(2)}${
+              } lineHeight ${fontMetrics.lineHeight.toFixed(2)}${
                 fontMetrics.fits ? '' : ' · glyphs clip'
               }`}
         </Text>
